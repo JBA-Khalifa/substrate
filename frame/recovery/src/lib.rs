@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,8 @@
 
 //! # Recovery Pallet
 //!
-//! - [`recovery::Config`](./trait.Config.html)
-//! - [`Call`](./enum.Call.html)
+//! - [`Config`]
+//! - [`Call`]
 //!
 //! ## Overview
 //!
@@ -317,6 +317,8 @@ decl_error! {
 		Overflow,
 		/// This account is already set up for recovery
 		AlreadyProxy,
+		/// Some internal state is broken.
+		BadState,
 	}
 }
 
@@ -352,13 +354,16 @@ decl_module! {
 		/// - The weight of the `call` + 10,000.
 		/// - One storage lookup to check account is recovered by `who`. O(1)
 		/// # </weight>
-		#[weight = (
-			call.get_dispatch_info().weight
-				.saturating_add(10_000)
-				 // AccountData for inner call origin accountdata.
-				.saturating_add(T::DbWeight::get().reads_writes(1, 1)),
-			call.get_dispatch_info().class
-		)]
+		#[weight = {
+			let dispatch_info = call.get_dispatch_info();
+			(
+				dispatch_info.weight
+					.saturating_add(10_000)
+					// AccountData for inner call origin accountdata.
+					.saturating_add(T::DbWeight::get().reads_writes(1, 1)),
+				dispatch_info.class,
+			)
+		}]
 		fn as_recovered(origin,
 			account: T::AccountId,
 			call: Box<<T as Config>::Call>
@@ -491,7 +496,7 @@ decl_module! {
 			T::Currency::reserve(&who, recovery_deposit)?;
 			// Create an active recovery status
 			let recovery_status = ActiveRecovery {
-				created: <system::Module<T>>::block_number(),
+				created: <system::Pallet<T>>::block_number(),
 				deposit: recovery_deposit,
 				friends: vec![],
 			};
@@ -573,7 +578,7 @@ decl_module! {
 			let active_recovery = Self::active_recovery(&account, &who).ok_or(Error::<T>::NotStarted)?;
 			ensure!(!Proxy::<T>::contains_key(&who), Error::<T>::AlreadyProxy);
 			// Make sure the delay period has passed
-			let current_block_number = <system::Module<T>>::block_number();
+			let current_block_number = <system::Pallet<T>>::block_number();
 			let recoverable_block_number = active_recovery.created
 				.checked_add(&recovery_config.delay_period)
 				.ok_or(Error::<T>::Overflow)?;
@@ -583,9 +588,9 @@ decl_module! {
 				recovery_config.threshold as usize <= active_recovery.friends.len(),
 				Error::<T>::Threshold
 			);
+			system::Pallet::<T>::inc_consumers(&who).map_err(|_| Error::<T>::BadState)?;
 			// Create the recovery storage item
 			Proxy::<T>::insert(&who, &account);
-			system::Module::<T>::inc_ref(&who);
 			Self::deposit_event(RawEvent::AccountRecovered(account, who));
 		}
 
@@ -616,7 +621,8 @@ decl_module! {
 			let active_recovery = <ActiveRecoveries<T>>::take(&who, &rescuer).ok_or(Error::<T>::NotStarted)?;
 			// Move the reserved funds from the rescuer to the rescued account.
 			// Acts like a slashing mechanism for those who try to maliciously recover accounts.
-			let _ = T::Currency::repatriate_reserved(&rescuer, &who, active_recovery.deposit, BalanceStatus::Free);
+			let res = T::Currency::repatriate_reserved(&rescuer, &who, active_recovery.deposit, BalanceStatus::Free);
+			debug_assert!(res.is_ok());
 			Self::deposit_event(RawEvent::RecoveryClosed(who, rescuer));
 		}
 
@@ -672,7 +678,7 @@ decl_module! {
 			// Check `who` is allowed to make a call on behalf of `account`
 			ensure!(Self::proxy(&who) == Some(account), Error::<T>::NotAllowed);
 			Proxy::<T>::remove(&who);
-			system::Module::<T>::dec_ref(&who);
+			system::Pallet::<T>::dec_consumers(&who);
 		}
 	}
 }

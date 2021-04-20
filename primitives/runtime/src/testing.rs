@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -247,7 +247,7 @@ impl<'a, Xt> Deserialize<'a> for Block<Xt> where Block<Xt>: Decode {
 	fn deserialize<D: Deserializer<'a>>(de: D) -> Result<Self, D::Error> {
 		let r = <Vec<u8>>::deserialize(de)?;
 		Decode::decode(&mut &r[..])
-			.map_err(|e| DeError::custom(format!("Invalid value passed into decode: {}", e.what())))
+			.map_err(|e| DeError::custom(format!("Invalid value passed into decode: {}", e)))
 	}
 }
 
@@ -301,6 +301,14 @@ impl<Call: Codec + Sync + Send, Extra> traits::Extrinsic for TestXt<Call, Extra>
 	fn new(c: Call, sig: Option<Self::SignaturePayload>) -> Option<Self> {
 		Some(TestXt { signature: sig, call: c })
 	}
+}
+
+impl<Call, Extra> traits::ExtrinsicMetadata for TestXt<Call, Extra> where
+	Call: Codec + Sync + Send,
+	Extra: SignedExtension<AccountId=u64, Call=Call>,
+{
+	type SignedExtensions = Extra;
+	const VERSION: u8 = 0u8;
 }
 
 impl<Origin, Call, Extra> Applyable for TestXt<Call, Extra> where

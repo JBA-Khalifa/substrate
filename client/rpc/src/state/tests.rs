@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -180,7 +180,7 @@ fn should_notify_about_storage_changes() {
 			nonce: 0,
 		}).unwrap();
 		let block = builder.build().unwrap().block;
-		client.import(BlockOrigin::Own, block).unwrap();
+		executor::block_on(client.import(BlockOrigin::Own, block)).unwrap();
 	}
 
 	// assert notification sent to transport
@@ -222,7 +222,7 @@ fn should_send_initial_storage_changes_and_notifications() {
 			nonce: 0,
 		}).unwrap();
 		let block = builder.build().unwrap().block;
-		client.import(BlockOrigin::Own, block).unwrap();
+		executor::block_on(client.import(BlockOrigin::Own, block)).unwrap();
 	}
 
 	// assert initial values sent to transport
@@ -258,7 +258,7 @@ fn should_query_storage() {
 			builder.push_storage_change(vec![5], Some(vec![nonce as u8])).unwrap();
 			let block = builder.build().unwrap().block;
 			let hash = block.header.hash();
-			client.import(BlockOrigin::Own, block).unwrap();
+			executor::block_on(client.import(BlockOrigin::Own, block)).unwrap();
 			hash
 		};
 		let block1_hash = add_block(0);

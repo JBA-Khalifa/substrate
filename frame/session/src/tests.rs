@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,9 @@
 // Tests for the Session Pallet
 
 use super::*;
-use frame_support::{traits::OnInitialize, assert_ok};
+use mock::Test;
+use codec::Decode;
+use frame_support::{traits::OnInitialize, assert_ok, assert_noop};
 use sp_core::crypto::key_types::DUMMY;
 use sp_runtime::testing::UintAuthorityId;
 use mock::{
@@ -60,9 +62,9 @@ fn keys_cleared_on_kill() {
 		let id = DUMMY;
 		assert_eq!(Session::key_owner(id, UintAuthorityId(1).get_raw(id)), Some(1));
 
-		assert!(!System::allow_death(&1));
+		assert!(System::is_provider_required(&1));
 		assert_ok!(Session::purge_keys(Origin::signed(1)));
-		assert!(System::allow_death(&1));
+		assert!(!System::is_provider_required(&1));
 
 		assert_eq!(Session::load_keys(&1), None);
 		assert_eq!(Session::key_owner(id, UintAuthorityId(1).get_raw(id)), None);
@@ -180,11 +182,14 @@ fn duplicates_are_not_allowed() {
 	new_test_ext().execute_with(|| {
 		System::set_block_number(1);
 		Session::on_initialize(1);
-		assert!(Session::set_keys(Origin::signed(4), UintAuthorityId(1).into(), vec![]).is_err());
-		assert!(Session::set_keys(Origin::signed(1), UintAuthorityId(10).into(), vec![]).is_ok());
+		assert_noop!(
+			Session::set_keys(Origin::signed(4), UintAuthorityId(1).into(), vec![]),
+			Error::<Test>::DuplicatedKey,
+		);
+		assert_ok!(Session::set_keys(Origin::signed(1), UintAuthorityId(10).into(), vec![]));
 
 		// is fine now that 1 has migrated off.
-		assert!(Session::set_keys(Origin::signed(4), UintAuthorityId(1).into(), vec![]).is_ok());
+		assert_ok!(Session::set_keys(Origin::signed(4), UintAuthorityId(1).into(), vec![]));
 	});
 }
 
@@ -252,31 +257,74 @@ fn session_changed_flag_works() {
 
 #[test]
 fn periodic_session_works() {
-	struct Period;
-	struct Offset;
-
-	impl Get<u64> for Period {
-		fn get() -> u64 { 10 }
+	frame_support::parameter_types! {
+		const Period: u64 = 10;
+		const Offset: u64 = 3;
 	}
-
-	impl Get<u64> for Offset {
-		fn get() -> u64 { 3 }
-	}
-
 
 	type P = PeriodicSessions<Period, Offset>;
 
-	for i in 0..3 {
+	// make sure that offset phase behaves correctly
+	for i in 0u64..3 {
 		assert!(!P::should_end_session(i));
+		assert_eq!(P::estimate_next_session_rotation(i).0.unwrap(), 3);
+
+		// the last block of the session (i.e. the one before session rotation)
+		// should have progress 100%.
+		if P::estimate_next_session_rotation(i).0.unwrap() - 1 == i {
+			assert_eq!(
+				P::estimate_current_session_progress(i).0.unwrap(),
+				Percent::from_percent(100)
+			);
+		} else {
+			assert!(
+				P::estimate_current_session_progress(i).0.unwrap() < Percent::from_percent(100)
+			);
+		}
 	}
 
-	assert!(P::should_end_session(3));
+	// we end the session at block #3 and we consider this block the first one
+	// from the next session. since we're past the offset phase it represents
+	// 1/10 of progress.
+	assert!(P::should_end_session(3u64));
+	assert_eq!(P::estimate_next_session_rotation(3u64).0.unwrap(), 3);
+	assert_eq!(
+		P::estimate_current_session_progress(3u64).0.unwrap(),
+		Percent::from_percent(10),
+	);
 
-	for i in (1..10).map(|i| 3 + i) {
+	for i in (1u64..10).map(|i| 3 + i) {
 		assert!(!P::should_end_session(i));
+		assert_eq!(P::estimate_next_session_rotation(i).0.unwrap(), 13);
+
+		// as with the offset phase the last block of the session must have 100%
+		// progress.
+		if P::estimate_next_session_rotation(i).0.unwrap() - 1 == i {
+			assert_eq!(
+				P::estimate_current_session_progress(i).0.unwrap(),
+				Percent::from_percent(100)
+			);
+		} else {
+			assert!(
+				P::estimate_current_session_progress(i).0.unwrap() < Percent::from_percent(100)
+			);
+		}
 	}
 
-	assert!(P::should_end_session(13));
+	// the new session starts and we proceed in 1/10 increments.
+	assert!(P::should_end_session(13u64));
+	assert_eq!(P::estimate_next_session_rotation(13u64).0.unwrap(), 23);
+	assert_eq!(
+		P::estimate_current_session_progress(13u64).0.unwrap(),
+		Percent::from_percent(10)
+	);
+
+	assert!(!P::should_end_session(14u64));
+	assert_eq!(P::estimate_next_session_rotation(14u64).0.unwrap(), 23);
+	assert_eq!(
+		P::estimate_current_session_progress(14u64).0.unwrap(),
+		Percent::from_percent(20)
+	);
 }
 
 #[test]
@@ -313,7 +361,6 @@ fn return_true_if_more_than_third_is_disabled() {
 #[test]
 fn upgrade_keys() {
 	use frame_support::storage;
-	use mock::Test;
 	use sp_core::crypto::key_types::DUMMY;
 
 	// This test assumes certain mocks.

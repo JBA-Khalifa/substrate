@@ -1,18 +1,20 @@
-// Copyright 2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! DB-backed changes tries storage.
 
@@ -953,7 +955,8 @@ mod tests {
 		let block0 = insert_header_with_configuration_change(&backend, 0, Default::default(), None, config0);
 		let config1 = Some(ChangesTrieConfiguration::new(2, 6));
 		let block1 = insert_header_with_configuration_change(&backend, 1, block0, changes(0), config1);
-		backend.finalize_block(BlockId::Number(1), Some(vec![42])).unwrap();
+		let just1 = Some((*b"TEST", vec![42]));
+		backend.finalize_block(BlockId::Number(1), just1).unwrap();
 		let config2 = Some(ChangesTrieConfiguration::new(2, 7));
 		let block2 = insert_header_with_configuration_change(&backend, 2, block1, changes(1), config2);
 		let config2_1 = Some(ChangesTrieConfiguration::new(2, 8));

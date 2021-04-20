@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -104,8 +104,7 @@ mod tests {
 	use super::*;
 	use sp_io::TestExternalities;
 	use sp_core::offchain::{
-		OffchainExt,
-		OffchainStorage,
+		OffchainDbExt,
 		testing,
 	};
 
@@ -113,7 +112,7 @@ mod tests {
 	fn should_set_and_get() {
 		let (offchain, state) = testing::TestOffchainExt::new();
 		let mut t = TestExternalities::default();
-		t.register_extension(OffchainExt::new(offchain));
+		t.register_extension(OffchainDbExt::new(offchain));
 
 		t.execute_with(|| {
 			let val = StorageValue::persistent(b"testval");
@@ -125,7 +124,7 @@ mod tests {
 			assert_eq!(val.get::<u32>(), Some(Some(15_u32)));
 			assert_eq!(val.get::<Vec<u8>>(), Some(None));
 			assert_eq!(
-				state.read().persistent_storage.get(b"", b"testval"),
+				state.read().persistent_storage.get(b"testval"),
 				Some(vec![15_u8, 0, 0, 0])
 			);
 		})
@@ -135,7 +134,7 @@ mod tests {
 	fn should_mutate() {
 		let (offchain, state) = testing::TestOffchainExt::new();
 		let mut t = TestExternalities::default();
-		t.register_extension(OffchainExt::new(offchain));
+		t.register_extension(OffchainDbExt::new(offchain));
 
 		t.execute_with(|| {
 			let val = StorageValue::persistent(b"testval");
@@ -148,7 +147,7 @@ mod tests {
 			assert_eq!(result, Ok(Ok(16_u32)));
 			assert_eq!(val.get::<u32>(), Some(Some(16_u32)));
 			assert_eq!(
-				state.read().persistent_storage.get(b"", b"testval"),
+				state.read().persistent_storage.get(b"testval"),
 				Some(vec![16_u8, 0, 0, 0])
 			);
 

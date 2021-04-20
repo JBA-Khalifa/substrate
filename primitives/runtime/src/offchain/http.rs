@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -518,7 +518,7 @@ mod tests {
 	use super::*;
 	use sp_io::TestExternalities;
 	use sp_core::offchain::{
-		OffchainExt,
+		OffchainWorkerExt,
 		testing,
 	};
 
@@ -526,7 +526,7 @@ mod tests {
 	fn should_send_a_basic_request_and_get_response() {
 		let (offchain, state) = testing::TestOffchainExt::new();
 		let mut t = TestExternalities::default();
-		t.register_extension(OffchainExt::new(offchain));
+		t.register_extension(OffchainWorkerExt::new(offchain));
 
 		t.execute_with(|| {
 			let request: Request = Request::get("http://localhost:1234");
@@ -567,7 +567,7 @@ mod tests {
 	fn should_send_a_post_request() {
 		let (offchain, state) = testing::TestOffchainExt::new();
 		let mut t = TestExternalities::default();
-		t.register_extension(OffchainExt::new(offchain));
+		t.register_extension(OffchainWorkerExt::new(offchain));
 
 		t.execute_with(|| {
 			let pending = Request::default()

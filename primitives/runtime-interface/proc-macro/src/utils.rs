@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Util function used by this crate.
 
@@ -23,10 +24,9 @@ use syn::{
 	TraitItem, parse_quote, spanned::Spanned, Result, Meta, NestedMeta, Lit, Attribute,
 };
 
-use proc_macro_crate::crate_name;
+use proc_macro_crate::{crate_name, FoundCrate};
 
-use std::env;
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::{env, collections::{BTreeMap, btree_map::Entry}};
 
 use quote::quote;
 
@@ -76,21 +76,18 @@ impl<'a> RuntimeInterface<'a> {
 
 /// Generates the include for the runtime-interface crate.
 pub fn generate_runtime_interface_include() -> TokenStream {
-	if env::var("CARGO_PKG_NAME").unwrap() == "sp-runtime-interface" {
-		TokenStream::new()
-	} else {
-		match crate_name("sp-runtime-interface") {
-			Ok(crate_name) => {
-				let crate_name = Ident::new(&crate_name, Span::call_site());
-				quote!(
-					#[doc(hidden)]
-					extern crate #crate_name as proc_macro_runtime_interface;
-				)
-			},
-			Err(e) => {
-				let err = Error::new(Span::call_site(), &e).to_compile_error();
-				quote!( #err )
-			}
+	match crate_name("sp-runtime-interface") {
+		Ok(FoundCrate::Itself) => quote!(),
+		Ok(FoundCrate::Name(crate_name)) => {
+			let crate_name = Ident::new(&crate_name, Span::call_site());
+			quote!(
+				#[doc(hidden)]
+				extern crate #crate_name as proc_macro_runtime_interface;
+			)
+		},
+		Err(e) => {
+			let err = Error::new(Span::call_site(), e).to_compile_error();
+			quote!( #err )
 		}
 	}
 }

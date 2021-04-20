@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -90,7 +90,7 @@ impl ChangesTrieConfiguration {
 				return max_digest_interval;
 			}
 
-			current_level = current_level - 1;
+			current_level -= 1;
 		}
 	}
 
@@ -192,7 +192,7 @@ impl ChangesTrieConfiguration {
 
 			digest_step = digest_interval;
 			digest_interval = new_digest_interval;
-			current_level = current_level + 1;
+			current_level += 1;
 		}
 
 		Some((

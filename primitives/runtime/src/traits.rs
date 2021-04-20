@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +19,6 @@
 
 use sp_std::prelude::*;
 use sp_std::{self, marker::PhantomData, convert::{TryFrom, TryInto}, fmt::Debug};
-use sp_io;
 #[cfg(feature = "std")]
 use std::fmt::Display;
 #[cfg(feature = "std")]
@@ -111,7 +110,7 @@ impl Verify for sp_core::ecdsa::Signature {
 			self.as_ref(),
 			&sp_io::hashing::blake2_256(msg.get()),
 		) {
-			Ok(pubkey) => &signer.as_ref()[..] == &pubkey[..],
+			Ok(pubkey) => signer.as_ref() == &pubkey[..],
 			_ => false,
 		}
 	}
@@ -150,6 +149,25 @@ pub struct BadOrigin;
 impl From<BadOrigin> for &'static str {
 	fn from(_: BadOrigin) -> &'static str {
 		"Bad origin"
+	}
+}
+
+/// Error that can be returned by our impl of `StoredMap`.
+#[derive(Encode, Decode, RuntimeDebug)]
+pub enum StoredMapError {
+	/// Attempt to create map value when it is a consumer and there are no providers in place.
+	NoProviders,
+	/// Attempt to anull/remove value when it is the last provider and there is still at
+	/// least one consumer left.
+	ConsumerRemaining,
+}
+
+impl From<StoredMapError> for &'static str {
+	fn from(e: StoredMapError) -> &'static str {
+		match e {
+			StoredMapError::NoProviders => "No providers",
+			StoredMapError::ConsumerRemaining => "Consumer remaining",
+		}
 	}
 }
 
@@ -1199,19 +1217,24 @@ macro_rules! impl_opaque_keys {
 			)*
 		}
 	) => {
-		$( #[ $attr ] )*
-		#[derive(
-			Default, Clone, PartialEq, Eq,
-			$crate::codec::Encode,
-			$crate::codec::Decode,
-			$crate::RuntimeDebug,
-		)]
-		#[cfg_attr(feature = "std", derive($crate::serde::Serialize, $crate::serde::Deserialize))]
-		pub struct $name {
-			$(
-				$( #[ $inner_attr ] )*
-				pub $field: <$type as $crate::BoundToRuntimeAppPublic>::Public,
-			)*
+		$crate::paste::paste! {
+			#[cfg(feature = "std")]
+			use $crate::serde as [< __opaque_keys_serde_import__ $name >];
+			$( #[ $attr ] )*
+				#[derive(
+					Default, Clone, PartialEq, Eq,
+					$crate::codec::Encode,
+					$crate::codec::Decode,
+					$crate::RuntimeDebug,
+				)]
+			#[cfg_attr(feature = "std", derive($crate::serde::Serialize, $crate::serde::Deserialize))]
+			#[cfg_attr(feature = "std", serde(crate = "__opaque_keys_serde_import__" $name))]
+			pub struct $name {
+				$(
+					$( #[ $inner_attr ] )*
+						pub $field: <$type as $crate::BoundToRuntimeAppPublic>::Public,
+				)*
+			}
 		}
 
 		impl $name {

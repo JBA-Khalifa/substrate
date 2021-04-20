@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! BABE testsuite
 
@@ -26,21 +28,14 @@ use sp_keystore::{
 	SyncCryptoStore,
 	vrf::make_transcript as transcript_from_data,
 };
-use sp_consensus_babe::{
-	AuthorityPair,
-	SlotNumber,
-	AllowedSlots,
-	make_transcript,
-	make_transcript_data,
-};
+use sp_consensus_babe::{AuthorityPair, Slot, AllowedSlots, make_transcript, make_transcript_data};
 use sc_consensus_slots::BackoffAuthoringOnFinalizedHeadLagging;
 use sc_block_builder::{BlockBuilder, BlockBuilderProvider};
 use sp_consensus::{
-	NoNetwork as DummyOracle, Proposal, RecordProof, AlwaysCanAuthor,
+	NoNetwork as DummyOracle, Proposal, DisableProofRecording, AlwaysCanAuthor,
 	import_queue::{BoxBlockImport, BoxJustificationImport},
 };
-use sc_network_test::*;
-use sc_network_test::{Block as TestBlock, PeersClient};
+use sc_network_test::{Block as TestBlock, *};
 use sc_network::config::ProtocolConfig;
 use sp_runtime::{generic::DigestItem, traits::{Block as BlockT, DigestFor}};
 use sc_client_api::{BlockchainEvents, backend::TransactionFor};
@@ -48,11 +43,11 @@ use log::debug;
 use std::{time::Duration, cell::RefCell, task::Poll};
 use rand::RngCore;
 use rand_chacha::{
-	rand_core::SeedableRng,
-	ChaChaRng,
+	rand_core::SeedableRng, ChaChaRng,
 };
 use sc_keystore::LocalKeystore;
 use sp_application_crypto::key_types::BABE;
+use futures::executor::block_on;
 
 type Item = DigestItem<Hash>;
 
@@ -73,6 +68,9 @@ enum Stage {
 
 type Mutator = Arc<dyn Fn(&mut TestHeader, Stage) + Send + Sync>;
 
+type BabeBlockImport =
+	PanickingBlockImport<crate::BabeBlockImport<TestBlock, TestClient, Arc<TestClient>>>;
+
 #[derive(Clone)]
 struct DummyFactory {
 	client: Arc<TestClient>,
@@ -85,7 +83,7 @@ struct DummyProposer {
 	factory: DummyFactory,
 	parent_hash: Hash,
 	parent_number: u64,
-	parent_slot: SlotNumber,
+	parent_slot: Slot,
 }
 
 impl Environment<TestBlock> for DummyFactory {
@@ -99,7 +97,7 @@ impl Environment<TestBlock> for DummyFactory {
 
 		let parent_slot = crate::find_pre_digest::<TestBlock>(parent_header)
 			.expect("parent header has a pre-digest")
-			.slot_number();
+			.slot();
 
 		future::ready(Ok(DummyProposer {
 			factory: self.clone(),
@@ -116,7 +114,8 @@ impl DummyProposer {
 			Result<
 				Proposal<
 					TestBlock,
-					sc_client_api::TransactionFor<substrate_test_runtime_client::Backend, TestBlock>
+					sc_client_api::TransactionFor<substrate_test_runtime_client::Backend, TestBlock>,
+					()
 				>,
 				Error
 			>
@@ -135,11 +134,11 @@ impl DummyProposer {
 
 		let this_slot = crate::find_pre_digest::<TestBlock>(block.header())
 			.expect("baked block has valid pre-digest")
-			.slot_number();
+			.slot();
 
 		// figure out if we should add a consensus digest, since the test runtime
 		// doesn't.
-		let epoch_changes = self.factory.epoch_changes.lock();
+		let epoch_changes = self.factory.epoch_changes.shared_data();
 		let epoch = epoch_changes.epoch_data_for_child_of(
 			descendent_query(&*self.factory.client),
 			&self.parent_hash,
@@ -167,21 +166,23 @@ impl DummyProposer {
 		// mutate the block header according to the mutator.
 		(self.factory.mutator)(&mut block.header, Stage::PreSeal);
 
-		future::ready(Ok(Proposal { block, proof: None, storage_changes: Default::default() }))
+		future::ready(Ok(Proposal { block, proof: (), storage_changes: Default::default() }))
 	}
 }
 
 impl Proposer<TestBlock> for DummyProposer {
 	type Error = Error;
 	type Transaction = sc_client_api::TransactionFor<substrate_test_runtime_client::Backend, TestBlock>;
-	type Proposal = future::Ready<Result<Proposal<TestBlock, Self::Transaction>, Error>>;
+	type Proposal = future::Ready<Result<Proposal<TestBlock, Self::Transaction, ()>, Error>>;
+	type ProofRecording = DisableProofRecording;
+	type Proof = ();
 
 	fn propose(
 		mut self,
 		_: InherentData,
 		pre_digests: DigestFor<TestBlock>,
 		_: Duration,
-		_: RecordProof,
+		_: Option<usize>,
 	) -> Self::Proposal {
 		self.propose_with(pre_digests)
 	}
@@ -192,30 +193,37 @@ thread_local! {
 }
 
 #[derive(Clone)]
-struct PanickingBlockImport<B>(B);
+pub struct PanickingBlockImport<B>(B);
 
-impl<B: BlockImport<TestBlock>> BlockImport<TestBlock> for PanickingBlockImport<B> {
+#[async_trait::async_trait]
+impl<B: BlockImport<TestBlock>> BlockImport<TestBlock> for PanickingBlockImport<B>
+	where
+		B::Transaction: Send,
+		B: Send,
+{
 	type Error = B::Error;
 	type Transaction = B::Transaction;
 
-	fn import_block(
+	async fn import_block(
 		&mut self,
 		block: BlockImportParams<TestBlock, Self::Transaction>,
 		new_cache: HashMap<CacheKeyId, Vec<u8>>,
 	) -> Result<ImportResult, Self::Error> {
-		Ok(self.0.import_block(block, new_cache).expect("importing block failed"))
+		Ok(self.0.import_block(block, new_cache).await.expect("importing block failed"))
 	}
 
-	fn check_block(
+	async fn check_block(
 		&mut self,
 		block: BlockCheckParams<TestBlock>,
 	) -> Result<ImportResult, Self::Error> {
-		Ok(self.0.check_block(block).expect("checking block failed"))
+		Ok(self.0.check_block(block).await.expect("checking block failed"))
 	}
 }
 
+type BabePeer = Peer<Option<PeerData>, BabeBlockImport>;
+
 pub struct BabeTestNet {
-	peers: Vec<Peer<Option<PeerData>>>,
+	peers: Vec<BabePeer>,
 }
 
 type TestHeader = <TestBlock as BlockT>::Header;
@@ -231,20 +239,21 @@ pub struct TestVerifier {
 	mutator: Mutator,
 }
 
+#[async_trait::async_trait]
 impl Verifier<TestBlock> for TestVerifier {
 	/// Verify the given data and return the BlockImportParams and an optional
 	/// new set of validators to import. If not, err with an Error-Message
 	/// presented to the User in the logs.
-	fn verify(
+	async fn verify(
 		&mut self,
 		origin: BlockOrigin,
 		mut header: TestHeader,
-		justification: Option<Justification>,
+		justifications: Option<Justifications>,
 		body: Option<Vec<TestExtrinsic>>,
 	) -> Result<(BlockImportParams<TestBlock, ()>, Option<Vec<(CacheKeyId, Vec<u8>)>>), String> {
 		// apply post-sealing mutations (i.e. stripping seal, if desired).
 		(self.mutator)(&mut header, Stage::PostSeal);
-		self.inner.verify(origin, header, justification, body)
+		self.inner.verify(dbg!(origin), header, justifications, body).await
 	}
 }
 
@@ -259,6 +268,7 @@ pub struct PeerData {
 impl TestNetFactory for BabeTestNet {
 	type Verifier = TestVerifier;
 	type PeerData = Option<PeerData>;
+	type BlockImport = BabeBlockImport;
 
 	/// Create new test network with peers and given config.
 	fn from_config(_config: &ProtocolConfig) -> Self {
@@ -268,9 +278,9 @@ impl TestNetFactory for BabeTestNet {
 		}
 	}
 
-	fn make_block_import<Transaction>(&self, client: PeersClient)
+	fn make_block_import(&self, client: PeersClient)
 		-> (
-			BlockImportAdapter<Transaction>,
+			BlockImportAdapter<Self::BlockImport>,
 			Option<BoxJustificationImport<Block>>,
 			Option<PeerData>,
 		)
@@ -291,7 +301,7 @@ impl TestNetFactory for BabeTestNet {
 			Some(Box::new(block_import.clone()) as BoxBlockImport<_, _>)
 		);
 		(
-			BlockImportAdapter::new_full(block_import),
+			BlockImportAdapter::new(block_import),
 			None,
 			Some(PeerData { link, inherent_data_providers, block_import: data_block_import }),
 		)
@@ -324,22 +334,23 @@ impl TestNetFactory for BabeTestNet {
 				epoch_changes: data.link.epoch_changes.clone(),
 				time_source: data.link.time_source.clone(),
 				can_author_with: AlwaysCanAuthor,
+				telemetry: None,
 			},
 			mutator: MUTATOR.with(|m| m.borrow().clone()),
 		}
 	}
 
-	fn peer(&mut self, i: usize) -> &mut Peer<Self::PeerData> {
+	fn peer(&mut self, i: usize) -> &mut BabePeer {
 		trace!(target: "babe", "Retrieving a peer");
 		&mut self.peers[i]
 	}
 
-	fn peers(&self) -> &Vec<Peer<Self::PeerData>> {
+	fn peers(&self) -> &Vec<BabePeer> {
 		trace!(target: "babe", "Retrieving peers");
 		&self.peers
 	}
 
-	fn mut_peers<F: FnOnce(&mut Vec<Peer<Self::PeerData>>)>(
+	fn mut_peers<F: FnOnce(&mut Vec<BabePeer>)>(
 		&mut self,
 		closure: F,
 	) {
@@ -435,9 +446,11 @@ fn run_one_test(
 			babe_link: data.link.clone(),
 			keystore,
 			can_author_with: sp_consensus::AlwaysCanAuthor,
+			block_proposal_slot_portion: SlotProportion::new(0.5),
+			telemetry: None,
 		}).expect("Starts babe"));
 	}
-	futures::executor::block_on(future::select(
+	block_on(future::select(
 		futures::future::poll_fn(move |cx| {
 			let mut net = net.lock();
 			net.poll(cx);
@@ -527,7 +540,7 @@ fn can_author_block() {
 
 	let mut i = 0;
 	let epoch = Epoch {
-		start_slot: 0,
+		start_slot: 0.into(),
 		authorities: vec![(public.into(), 1)],
 		randomness: [0; 32],
 		epoch_index: 1,
@@ -548,7 +561,7 @@ fn can_author_block() {
 	};
 
 	// with secondary slots enabled it should never be empty
-	match claim_slot(i, &epoch, &keystore) {
+	match claim_slot(i.into(), &epoch, &keystore) {
 		None => i += 1,
 		Some(s) => debug!(target: "babe", "Authored block {:?}", s.0),
 	}
@@ -557,7 +570,7 @@ fn can_author_block() {
 	// of times.
 	config.allowed_slots = AllowedSlots::PrimarySlots;
 	loop {
-		match claim_slot(i, &epoch, &keystore) {
+		match claim_slot(i.into(), &epoch, &keystore) {
 			None => i += 1,
 			Some(s) => {
 				debug!(target: "babe", "Authored block {:?}", s.0);
@@ -568,17 +581,17 @@ fn can_author_block() {
 }
 
 // Propose and import a new BABE block on top of the given parent.
-fn propose_and_import_block<Transaction>(
+fn propose_and_import_block<Transaction: Send + 'static>(
 	parent: &TestHeader,
-	slot_number: Option<SlotNumber>,
+	slot: Option<Slot>,
 	proposer_factory: &mut DummyFactory,
 	block_import: &mut BoxBlockImport<TestBlock, Transaction>,
 ) -> sp_core::H256 {
 	let mut proposer = futures::executor::block_on(proposer_factory.init(parent)).unwrap();
 
-	let slot_number = slot_number.unwrap_or_else(|| {
+	let slot = slot.unwrap_or_else(|| {
 		let parent_pre_digest = find_pre_digest::<TestBlock>(parent).unwrap();
-		parent_pre_digest.slot_number() + 1
+		parent_pre_digest.slot() + 1
 	});
 
 	let pre_digest = sp_runtime::generic::Digest {
@@ -586,7 +599,7 @@ fn propose_and_import_block<Transaction>(
 			Item::babe_pre_digest(
 				PreDigest::SecondaryPlain(SecondaryPlainPreDigest {
 					authority_index: 0,
-					slot_number,
+					slot,
 				}),
 			),
 		],
@@ -596,11 +609,11 @@ fn propose_and_import_block<Transaction>(
 
 	let mut block = futures::executor::block_on(proposer.propose_with(pre_digest)).unwrap().block;
 
-	let epoch_descriptor = proposer_factory.epoch_changes.lock().epoch_descriptor_for_child_of(
+	let epoch_descriptor = proposer_factory.epoch_changes.shared_data().epoch_descriptor_for_child_of(
 		descendent_query(&*proposer_factory.client),
 		&parent_hash,
 		*parent.number(),
-		slot_number,
+		slot,
 	).unwrap().unwrap();
 
 	let seal = {
@@ -624,10 +637,10 @@ fn propose_and_import_block<Transaction>(
 	import.body = Some(block.extrinsics);
 	import.intermediates.insert(
 		Cow::from(INTERMEDIATE_KEY),
-		Box::new(BabeIntermediate::<TestBlock> { epoch_descriptor }) as Box<dyn Any>,
+		Box::new(BabeIntermediate::<TestBlock> { epoch_descriptor }) as Box<_>,
 	);
 	import.fork_choice = Some(ForkChoiceStrategy::LongestChain);
-	let import_result = block_import.import_block(import, Default::default()).unwrap();
+	let import_result = block_on(block_import.import_block(import, Default::default())).unwrap();
 
 	match import_result {
 		ImportResult::Imported(_) => {},
@@ -658,19 +671,19 @@ fn importing_block_one_sets_genesis_epoch() {
 
 	let block_hash = propose_and_import_block(
 		&genesis_header,
-		Some(999),
+		Some(999.into()),
 		&mut proposer_factory,
 		&mut block_import,
 	);
 
-	let genesis_epoch = Epoch::genesis(&data.link.config, 999);
+	let genesis_epoch = Epoch::genesis(&data.link.config, 999.into());
 
-	let epoch_changes = data.link.epoch_changes.lock();
+	let epoch_changes = data.link.epoch_changes.shared_data();
 	let epoch_for_second_block = epoch_changes.epoch_data_for_child_of(
 		descendent_query(&*client),
 		&block_hash,
 		1,
-		1000,
+		1000.into(),
 		|slot| Epoch::genesis(&data.link.config, slot),
 	).unwrap().unwrap();
 
@@ -740,13 +753,13 @@ fn importing_epoch_change_block_prunes_tree() {
 
 	// We should be tracking a total of 9 epochs in the fork tree
 	assert_eq!(
-		epoch_changes.lock().tree().iter().count(),
+		epoch_changes.shared_data().tree().iter().count(),
 		9,
 	);
 
 	// And only one root
 	assert_eq!(
-		epoch_changes.lock().tree().roots().count(),
+		epoch_changes.shared_data().tree().roots().count(),
 		1,
 	);
 
@@ -757,16 +770,16 @@ fn importing_epoch_change_block_prunes_tree() {
 
 	// at this point no hashes from the first fork must exist on the tree
 	assert!(
-		!epoch_changes.lock().tree().iter().map(|(h, _, _)| h).any(|h| fork_1.contains(h)),
+		!epoch_changes.shared_data().tree().iter().map(|(h, _, _)| h).any(|h| fork_1.contains(h)),
 	);
 
 	// but the epoch changes from the other forks must still exist
 	assert!(
-		epoch_changes.lock().tree().iter().map(|(h, _, _)| h).any(|h| fork_2.contains(h))
+		epoch_changes.shared_data().tree().iter().map(|(h, _, _)| h).any(|h| fork_2.contains(h))
 	);
 
 	assert!(
-		epoch_changes.lock().tree().iter().map(|(h, _, _)| h).any(|h| fork_3.contains(h)),
+		epoch_changes.shared_data().tree().iter().map(|(h, _, _)| h).any(|h| fork_3.contains(h)),
 	);
 
 	// finalizing block #25 from the canon chain should prune out the second fork
@@ -775,12 +788,12 @@ fn importing_epoch_change_block_prunes_tree() {
 
 	// at this point no hashes from the second fork must exist on the tree
 	assert!(
-		!epoch_changes.lock().tree().iter().map(|(h, _, _)| h).any(|h| fork_2.contains(h)),
+		!epoch_changes.shared_data().tree().iter().map(|(h, _, _)| h).any(|h| fork_2.contains(h)),
 	);
 
 	// while epoch changes from the last fork should still exist
 	assert!(
-		epoch_changes.lock().tree().iter().map(|(h, _, _)| h).any(|h| fork_3.contains(h)),
+		epoch_changes.shared_data().tree().iter().map(|(h, _, _)| h).any(|h| fork_3.contains(h)),
 	);
 }
 
@@ -807,7 +820,7 @@ fn verify_slots_are_strictly_increasing() {
 	// we should have no issue importing this block
 	let b1 = propose_and_import_block(
 		&genesis_header,
-		Some(999),
+		Some(999.into()),
 		&mut proposer_factory,
 		&mut block_import,
 	);
@@ -818,7 +831,7 @@ fn verify_slots_are_strictly_increasing() {
 	// we will panic due to the `PanickingBlockImport` defined above.
 	propose_and_import_block(
 		&b1,
-		Some(999),
+		Some(999.into()),
 		&mut proposer_factory,
 		&mut block_import,
 	);
@@ -834,7 +847,7 @@ fn babe_transcript_generation_match() {
 		.expect("Generates authority pair");
 
 	let epoch = Epoch {
-		start_slot: 0,
+		start_slot: 0.into(),
 		authorities: vec![(public.into(), 1)],
 		randomness: [0; 32],
 		epoch_index: 1,
@@ -845,8 +858,8 @@ fn babe_transcript_generation_match() {
 		},
 	};
 
-	let orig_transcript = make_transcript(&epoch.randomness.clone(), 1, epoch.epoch_index);
-	let new_transcript = make_transcript_data(&epoch.randomness, 1, epoch.epoch_index);
+	let orig_transcript = make_transcript(&epoch.randomness.clone(), 1.into(), epoch.epoch_index);
+	let new_transcript = make_transcript_data(&epoch.randomness, 1.into(), epoch.epoch_index);
 
 	let test = |t: merlin::Transcript| -> [u8; 16] {
 		let mut b = [0u8; 16];

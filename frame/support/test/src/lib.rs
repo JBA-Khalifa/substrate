@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,4 +40,34 @@ pub trait Config: 'static {
 frame_support::decl_module! {
 	/// Some test module
 	pub struct Module<T: Config> for enum Call where origin: T::Origin, system=self {}
+}
+
+/// A PalletInfo implementation which just panics.
+pub struct PanicPalletInfo;
+
+impl frame_support::traits::PalletInfo for PanicPalletInfo {
+	fn index<P: 'static>() -> Option<usize> {
+		unimplemented!("PanicPalletInfo mustn't be triggered by tests");
+	}
+	fn name<P: 'static>() -> Option<&'static str> {
+		unimplemented!("PanicPalletInfo mustn't be triggered by tests");
+	}
+}
+
+/// Provides an implementation of [`frame_support::traits::Randomness`] that should only be used in tests!
+pub struct TestRandomness<T>(sp_std::marker::PhantomData<T>);
+
+impl<Output: codec::Decode + Default, T> frame_support::traits::Randomness<Output, T::BlockNumber>
+	for TestRandomness<T>
+where
+	T: frame_system::Config,
+{
+	fn random(subject: &[u8]) -> (Output, T::BlockNumber) {
+		use sp_runtime::traits::TrailingZeroInput;
+
+		(
+			Output::decode(&mut TrailingZeroInput::new(subject)).unwrap_or_default(),
+			frame_system::Pallet::<T>::block_number(),
+		)
+	}
 }

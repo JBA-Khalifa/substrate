@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,46 +17,51 @@
 
 //! # Session Module
 //!
-//! The Session module allows validators to manage their session keys, provides a function for changing
-//! the session length, and handles session rotation.
+//! The Session module allows validators to manage their session keys, provides a function for
+//! changing the session length, and handles session rotation.
 //!
-//! - [`session::Config`](./trait.Config.html)
-//! - [`Call`](./enum.Call.html)
-//! - [`Module`](./struct.Module.html)
+//! - [`Config`]
+//! - [`Call`]
+//! - [`Module`]
 //!
 //! ## Overview
 //!
 //! ### Terminology
 //! <!-- Original author of paragraph: @gavofyork -->
 //!
-//! - **Session:** A session is a period of time that has a constant set of validators. Validators can only join
-//! or exit the validator set at a session change. It is measured in block numbers. The block where a session is
-//! ended is determined by the `ShouldEndSession` trait. When the session is ending, a new validator set
-//! can be chosen by `OnSessionEnding` implementations.
-//! - **Session key:** A session key is actually several keys kept together that provide the various signing
-//! functions required by network authorities/validators in pursuit of their duties.
-//! - **Validator ID:** Every account has an associated validator ID. For some simple staking systems, this
-//! may just be the same as the account ID. For staking systems using a stash/controller model,
-//! the validator ID would be the stash account ID of the controller.
+//! - **Session:** A session is a period of time that has a constant set of validators. Validators
+//!   can only join or exit the validator set at a session change. It is measured in block numbers.
+//!   The block where a session is ended is determined by the `ShouldEndSession` trait. When the
+//!   session is ending, a new validator set can be chosen by `OnSessionEnding` implementations.
+//!
+//! - **Session key:** A session key is actually several keys kept together that provide the various
+//!   signing functions required by network authorities/validators in pursuit of their duties.
+//! - **Validator ID:** Every account has an associated validator ID. For some simple staking
+//!   systems, this may just be the same as the account ID. For staking systems using a
+//!   stash/controller model, the validator ID would be the stash account ID of the controller.
+//!
 //! - **Session key configuration process:** Session keys are set using `set_keys` for use not in
-//! the next session, but the session after next. They are stored in `NextKeys`, a mapping between
-//! the caller's `ValidatorId` and the session keys provided. `set_keys` allows users to set their
-//! session key prior to being selected as validator.
-//! It is a public call since it uses `ensure_signed`, which checks that the origin is a signed account.
-//! As such, the account ID of the origin stored in `NextKeys` may not necessarily be associated with
-//! a block author or a validator. The session keys of accounts are removed once their account balance is zero.
+//!   the next session, but the session after next. They are stored in `NextKeys`, a mapping between
+//!   the caller's `ValidatorId` and the session keys provided. `set_keys` allows users to set their
+//!   session key prior to being selected as validator. It is a public call since it uses
+//!   `ensure_signed`, which checks that the origin is a signed account. As such, the account ID of
+//!   the origin stored in `NextKeys` may not necessarily be associated with a block author or a
+//!   validator. The session keys of accounts are removed once their account balance is zero.
+//!
 //! - **Session length:** This pallet does not assume anything about the length of each session.
-//! Rather, it relies on an implementation of `ShouldEndSession` to dictate a new session's start.
-//! This pallet provides the `PeriodicSessions` struct for simple periodic sessions.
-//! - **Session rotation configuration:** Configure as either a 'normal' (rewardable session where rewards are
-//! applied) or 'exceptional' (slashable) session rotation.
+//!   Rather, it relies on an implementation of `ShouldEndSession` to dictate a new session's start.
+//!   This pallet provides the `PeriodicSessions` struct for simple periodic sessions.
+//!
+//! - **Session rotation configuration:** Configure as either a 'normal' (rewardable session where
+//!   rewards are applied) or 'exceptional' (slashable) session rotation.
+//!
 //! - **Session rotation process:** At the beginning of each block, the `on_initialize` function
-//! queries the provided implementation of `ShouldEndSession`. If the session is to end the newly
-//! activated validator IDs and session keys are taken from storage and passed to the
-//! `SessionHandler`. The validator set supplied by `SessionManager::new_session` and the corresponding session
-//! keys, which may have been registered via `set_keys` during the previous session, are written
-//! to storage where they will wait one session before being passed to the `SessionHandler`
-//! themselves.
+//!   queries the provided implementation of `ShouldEndSession`. If the session is to end the newly
+//!   activated validator IDs and session keys are taken from storage and passed to the
+//!   `SessionHandler`. The validator set supplied by `SessionManager::new_session` and the
+//!   corresponding session keys, which may have been registered via `set_keys` during the previous
+//!   session, are written to storage where they will wait one session before being passed to the
+//!   `SessionHandler` themselves.
 //!
 //! ### Goals
 //!
@@ -75,7 +80,7 @@
 //! ### Public Functions
 //!
 //! - `rotate_session` - Change to the next session. Register the new authority set. Queue changes
-//! for next session rotation.
+//!   for next session rotation.
 //! - `disable_index` - Disable a validator by index.
 //! - `disable` - Disable a validator by Validator ID
 //!
@@ -83,13 +88,14 @@
 //!
 //! ### Example from the FRAME
 //!
-//! The [Staking pallet](../pallet_staking/index.html) uses the Session pallet to get the validator set.
+//! The [Staking pallet](../pallet_staking/index.html) uses the Session pallet to get the validator
+//! set.
 //!
 //! ```
 //! use pallet_session as session;
 //!
 //! fn validators<T: pallet_session::Config>() -> Vec<<T as pallet_session::Config>::ValidatorId> {
-//!	<pallet_session::Module<T>>::validators()
+//! <pallet_session::Module<T>>::validators()
 //! }
 //! # fn main(){}
 //! ```
@@ -110,13 +116,16 @@ pub mod weights;
 
 use sp_std::{prelude::*, marker::PhantomData, ops::{Sub, Rem}};
 use codec::Decode;
-use sp_runtime::{KeyTypeId, Perbill, RuntimeAppPublic, BoundToRuntimeAppPublic};
-use sp_runtime::traits::{Convert, Zero, Member, OpaqueKeys, Saturating};
+use sp_runtime::{
+	traits::{AtLeast32BitUnsigned, Convert, Member, One, OpaqueKeys, Zero},
+	KeyTypeId, Perbill, Percent, RuntimeAppPublic,
+};
 use sp_staking::SessionIndex;
 use frame_support::{
 	ensure, decl_module, decl_event, decl_storage, decl_error, ConsensusEngineId, Parameter,
 	traits::{
 		Get, FindAuthor, ValidatorRegistration, EstimateNextSessionRotation, EstimateNextNewSession,
+		OneSessionHandler, ValidatorSet,
 	},
 	dispatch::{self, DispatchResult, DispatchError},
 	weights::Weight,
@@ -135,16 +144,14 @@ pub trait ShouldEndSession<BlockNumber> {
 /// The first session will have length of `Offset`, and
 /// the following sessions will have length of `Period`.
 /// This may prove nonsensical if `Offset` >= `Period`.
-pub struct PeriodicSessions<
-	Period,
-	Offset,
->(PhantomData<(Period, Offset)>);
+pub struct PeriodicSessions<Period, Offset>(PhantomData<(Period, Offset)>);
 
 impl<
-	BlockNumber: Rem<Output=BlockNumber> + Sub<Output=BlockNumber> + Zero + PartialOrd,
+	BlockNumber: Rem<Output = BlockNumber> + Sub<Output = BlockNumber> + Zero + PartialOrd,
 	Period: Get<BlockNumber>,
 	Offset: Get<BlockNumber>,
-> ShouldEndSession<BlockNumber> for PeriodicSessions<Period, Offset> {
+> ShouldEndSession<BlockNumber> for PeriodicSessions<Period, Offset>
+{
 	fn should_end_session(now: BlockNumber) -> bool {
 		let offset = Offset::get();
 		now >= offset && ((now - offset) % Period::get()).is_zero()
@@ -152,33 +159,66 @@ impl<
 }
 
 impl<
-	BlockNumber: Rem<Output=BlockNumber> + Sub<Output=BlockNumber> + Zero + PartialOrd + Saturating + Clone,
+	BlockNumber: AtLeast32BitUnsigned + Clone,
 	Period: Get<BlockNumber>,
-	Offset: Get<BlockNumber>,
-> EstimateNextSessionRotation<BlockNumber> for PeriodicSessions<Period, Offset> {
-	fn estimate_next_session_rotation(now: BlockNumber) -> Option<BlockNumber> {
+	Offset: Get<BlockNumber>
+> EstimateNextSessionRotation<BlockNumber> for PeriodicSessions<Period, Offset>
+{
+	fn average_session_length() -> BlockNumber {
+		Period::get()
+	}
+
+	fn estimate_current_session_progress(now: BlockNumber) -> (Option<Percent>, Weight) {
 		let offset = Offset::get();
 		let period = Period::get();
-		Some(if now > offset {
+
+		// NOTE: we add one since we assume that the current block has already elapsed,
+		// i.e. when evaluating the last block in the session the progress should be 100%
+		// (0% is never returned).
+		let progress = if now >= offset {
+			let current = (now - offset) % period.clone() + One::one();
+			Some(Percent::from_rational(
+				current.clone(),
+				period.clone(),
+			))
+		} else {
+			Some(Percent::from_rational(
+				now + One::one(),
+				offset,
+			))
+		};
+
+		// Weight note: `estimate_current_session_progress` has no storage reads and trivial
+		// computational overhead. There should be no risk to the chain having this weight value be
+		// zero for now. However, this value of zero was not properly calculated, and so it would be
+		// reasonable to come back here and properly calculate the weight of this function.
+		(progress, Zero::zero())
+	}
+
+	fn estimate_next_session_rotation(now: BlockNumber) -> (Option<BlockNumber>, Weight) {
+		let offset = Offset::get();
+		let period = Period::get();
+
+		let next_session = if now > offset {
 			let block_after_last_session = (now.clone() - offset) % period.clone();
 			if block_after_last_session > Zero::zero() {
-				now.saturating_add(
-					period.saturating_sub(block_after_last_session)
-				)
+				now.saturating_add(period.saturating_sub(block_after_last_session))
 			} else {
-				Zero::zero()
+				// this branch happens when the session is already rotated or will rotate in this
+				// block (depending on being called before or after `session::on_initialize`). Here,
+				// we assume the latter, namely that this is called after `session::on_initialize`,
+				// and thus we add period to it as well.
+				now + period
 			}
 		} else {
 			offset
-		})
-	}
+		};
 
-	fn weight(_now: BlockNumber) -> Weight {
-		// Weight note: `estimate_next_session_rotation` has no storage reads and trivial computational overhead.
-		// There should be no risk to the chain having this weight value be zero for now.
-		// However, this value of zero was not properly calculated, and so it would be reasonable
-		// to come back here and properly calculate the weight of this function.
-		0
+		// Weight note: `estimate_next_session_rotation` has no storage reads and trivial
+		// computational overhead. There should be no risk to the chain having this weight value be
+		// zero for now. However, this value of zero was not properly calculated, and so it would be
+		// reasonable to come back here and properly calculate the weight of this function.
+		(Some(next_session), Zero::zero())
 	}
 }
 
@@ -186,17 +226,17 @@ impl<
 pub trait SessionManager<ValidatorId> {
 	/// Plan a new session, and optionally provide the new validator set.
 	///
-	/// Even if the validator-set is the same as before, if any underlying economic
-	/// conditions have changed (i.e. stake-weights), the new validator set must be returned.
-	/// This is necessary for consensus engines making use of the session module to
-	/// issue a validator-set change so misbehavior can be provably associated with the new
-	/// economic conditions as opposed to the old.
-	/// The returned validator set, if any, will not be applied until `new_index`.
-	/// `new_index` is strictly greater than from previous call.
+	/// Even if the validator-set is the same as before, if any underlying economic conditions have
+	/// changed (i.e. stake-weights), the new validator set must be returned. This is necessary for
+	/// consensus engines making use of the session module to issue a validator-set change so
+	/// misbehavior can be provably associated with the new economic conditions as opposed to the
+	/// old. The returned validator set, if any, will not be applied until `new_index`. `new_index`
+	/// is strictly greater than from previous call.
 	///
 	/// The first session start at index 0.
 	///
-	/// `new_session(session)` is guaranteed to be called before `end_session(session-1)`.
+	/// `new_session(session)` is guaranteed to be called before `end_session(session-1)`. In other
+	/// words, a new session must always be planned before an ongoing one can be finished.
 	fn new_session(new_index: SessionIndex) -> Option<Vec<ValidatorId>>;
 	/// End the session.
 	///
@@ -205,7 +245,7 @@ pub trait SessionManager<ValidatorId> {
 	fn end_session(end_index: SessionIndex);
 	/// Start the session.
 	///
-	/// The session start to be used for validation
+	/// The session start to be used for validation.
 	fn start_session(start_index: SessionIndex);
 }
 
@@ -242,7 +282,7 @@ pub trait SessionHandler<ValidatorId> {
 
 	/// A notification for end of the session.
 	///
-	/// Note it is triggered before any `SessionManager::end_session` handlers,
+	/// Note it is triggered before any [`SessionManager::end_session`] handlers,
 	/// so we can still affect the validator set.
 	fn on_before_session_ending() {}
 
@@ -250,45 +290,9 @@ pub trait SessionHandler<ValidatorId> {
 	fn on_disabled(validator_index: usize);
 }
 
-/// A session handler for specific key type.
-pub trait OneSessionHandler<ValidatorId>: BoundToRuntimeAppPublic {
-	/// The key type expected.
-	type Key: Decode + Default + RuntimeAppPublic;
-
-	fn on_genesis_session<'a, I: 'a>(validators: I)
-		where I: Iterator<Item=(&'a ValidatorId, Self::Key)>, ValidatorId: 'a;
-
-	/// Session set has changed; act appropriately. Note that this can be called
-	/// before initialization of your module.
-	///
-	/// `changed` is true when at least one of the session keys
-	/// or the underlying economic identities/distribution behind one the
-	/// session keys has changed, false otherwise.
-	///
-	/// The `validators` are the validators of the incoming session, and `queued_validators`
-	/// will follow.
-	fn on_new_session<'a, I: 'a>(
-		changed: bool,
-		validators: I,
-		queued_validators: I,
-	) where I: Iterator<Item=(&'a ValidatorId, Self::Key)>, ValidatorId: 'a;
-
-
-	/// A notification for end of the session.
-	///
-	/// Note it is triggered before any `SessionManager::end_session` handlers,
-	/// so we can still affect the validator set.
-	fn on_before_session_ending() {}
-
-	/// A validator got disabled. Act accordingly until a new session begins.
-	fn on_disabled(_validator_index: usize);
-}
-
 #[impl_trait_for_tuples::impl_for_tuples(1, 30)]
-#[tuple_types_no_default_trait_bound]
+#[tuple_types_custom_trait_bound(OneSessionHandler<AId>)]
 impl<AId> SessionHandler<AId> for Tuple {
-	for_tuples!( where #( Tuple: OneSessionHandler<AId> )* );
-
 	for_tuples!(
 		const KEY_TYPE_IDS: &'static [KeyTypeId] = &[ #( <Tuple::Key as RuntimeAppPublic>::ID ),* ];
 	);
@@ -438,7 +442,11 @@ decl_storage! {
 			for (account, val, keys) in config.keys.iter().cloned() {
 				<Module<T>>::inner_set_keys(&val, keys)
 					.expect("genesis config must not contain duplicates; qed");
-				frame_system::Module::<T>::inc_ref(&account);
+				assert!(
+					frame_system::Pallet::<T>::inc_consumers(&account).is_ok(),
+					"Account ({:?}) does not exist at genesis to set key. Account not endowed?",
+					account,
+				);
 			}
 
 			let initial_validators_0 = T::SessionManager::new_session(0)
@@ -492,6 +500,8 @@ decl_error! {
 		DuplicatedKey,
 		/// No keys are associated with this account.
 		NoKeys,
+		/// Key setting account is not live, so it's impossible to associate keys.
+		NoAccount,
 	}
 }
 
@@ -740,9 +750,11 @@ impl<T: Config> Module<T> {
 		let who = T::ValidatorIdOf::convert(account.clone())
 			.ok_or(Error::<T>::NoAssociatedValidatorId)?;
 
+		ensure!(frame_system::Pallet::<T>::can_inc_consumer(&account), Error::<T>::NoAccount);
 		let old_keys = Self::inner_set_keys(&who, keys)?;
 		if old_keys.is_none() {
-			frame_system::Module::<T>::inc_ref(&account);
+			let assertion = frame_system::Pallet::<T>::inc_consumers(&account).is_ok();
+			debug_assert!(assertion, "can_inc_consumer() returned true; no change since; qed");
 		}
 
 		Ok(())
@@ -765,6 +777,10 @@ impl<T: Config> Module<T> {
 				Self::key_owner(*id, key).map_or(true, |owner| &owner == who),
 				Error::<T>::DuplicatedKey,
 			);
+		}
+
+		for id in T::Keys::key_ids() {
+			let key = keys.get_raw(*id);
 
 			if let Some(old) = old_keys.as_ref().map(|k| k.get_raw(*id)) {
 				if key == old {
@@ -790,7 +806,7 @@ impl<T: Config> Module<T> {
 			let key_data = old_keys.get_raw(*id);
 			Self::clear_key_owner(*id, key_data);
 		}
-		frame_system::Module::<T>::dec_ref(&account);
+		frame_system::Pallet::<T>::dec_consumers(&account);
 
 		Ok(())
 	}
@@ -807,7 +823,8 @@ impl<T: Config> Module<T> {
 		<NextKeys<T>>::insert(v, keys);
 	}
 
-	fn key_owner(id: KeyTypeId, key_data: &[u8]) -> Option<T::ValidatorId> {
+	/// Query the owner of a session key by returning the owner's validator ID.
+	pub fn key_owner(id: KeyTypeId, key_data: &[u8]) -> Option<T::ValidatorId> {
 		<KeyOwner<T>>::get((id, key_data))
 	}
 
@@ -817,6 +834,19 @@ impl<T: Config> Module<T> {
 
 	fn clear_key_owner(id: KeyTypeId, key_data: &[u8]) {
 		<KeyOwner<T>>::remove((id, key_data));
+	}
+}
+
+impl<T: Config> ValidatorSet<T::AccountId> for Module<T> {
+	type ValidatorId = T::ValidatorId;
+	type ValidatorIdOf = T::ValidatorIdOf;
+
+	fn session_index() -> sp_staking::SessionIndex {
+		Module::<T>::current_index()
+	}
+
+	fn validators() -> Vec<Self::ValidatorId> {
+		Module::<T>::validators()
 	}
 }
 
@@ -839,13 +869,13 @@ impl<T: Config, Inner: FindAuthor<u32>> FindAuthor<T::ValidatorId>
 }
 
 impl<T: Config> EstimateNextNewSession<T::BlockNumber> for Module<T> {
-	/// This session module always calls new_session and next_session at the same time, hence we
-	/// do a simple proxy and pass the function to next rotation.
-	fn estimate_next_new_session(now: T::BlockNumber) -> Option<T::BlockNumber> {
-		T::NextSessionRotation::estimate_next_session_rotation(now)
+	fn average_session_length() -> T::BlockNumber {
+		T::NextSessionRotation::average_session_length()
 	}
 
-	fn weight(now: T::BlockNumber) -> Weight {
-		T::NextSessionRotation::weight(now)
+	/// This session module always calls new_session and next_session at the same time, hence we
+	/// do a simple proxy and pass the function to next rotation.
+	fn estimate_next_new_session(now: T::BlockNumber) -> (Option<T::BlockNumber>, Weight) {
+		T::NextSessionRotation::estimate_next_session_rotation(now)
 	}
 }

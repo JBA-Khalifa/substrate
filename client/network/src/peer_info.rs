@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use fnv::FnvHashMap;
 use futures::prelude::*;
@@ -21,7 +23,7 @@ use libp2p::core::connection::{ConnectionId, ListenerId};
 use libp2p::core::{ConnectedPoint, either::EitherOutput, PeerId, PublicKey};
 use libp2p::swarm::{IntoProtocolsHandler, IntoProtocolsHandlerSelect, ProtocolsHandler};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
-use libp2p::identify::{Identify, IdentifyEvent, IdentifyInfo};
+use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent, IdentifyInfo};
 use libp2p::ping::{Ping, PingConfig, PingEvent, PingSuccess};
 use log::{debug, trace, error};
 use smallvec::SmallVec;
@@ -84,8 +86,9 @@ impl PeerInfoBehaviour {
 		local_public_key: PublicKey,
 	) -> Self {
 		let identify = {
-			let proto_version = "/substrate/1.0".to_string();
-			Identify::new(proto_version, user_agent, local_public_key)
+			let cfg = IdentifyConfig::new("/substrate/1.0".to_string(), local_public_key)
+				.with_agent_version(user_agent);
+			Identify::new(cfg)
 		};
 
 		PeerInfoBehaviour {
@@ -251,19 +254,29 @@ impl NetworkBehaviour for PeerInfoBehaviour {
 		self.identify.inject_dial_failure(peer_id);
 	}
 
-	fn inject_new_listen_addr(&mut self, addr: &Multiaddr) {
-		self.ping.inject_new_listen_addr(addr);
-		self.identify.inject_new_listen_addr(addr);
+	fn inject_new_listener(&mut self, id: ListenerId) {
+		self.ping.inject_new_listener(id);
+		self.identify.inject_new_listener(id);
 	}
 
-	fn inject_expired_listen_addr(&mut self, addr: &Multiaddr) {
-		self.ping.inject_expired_listen_addr(addr);
-		self.identify.inject_expired_listen_addr(addr);
+	fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+		self.ping.inject_new_listen_addr(id, addr);
+		self.identify.inject_new_listen_addr(id, addr);
+	}
+
+	fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+		self.ping.inject_expired_listen_addr(id, addr);
+		self.identify.inject_expired_listen_addr(id, addr);
 	}
 
 	fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
 		self.ping.inject_new_external_addr(addr);
 		self.identify.inject_new_external_addr(addr);
+	}
+
+	fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
+		self.ping.inject_expired_external_addr(addr);
+		self.identify.inject_expired_external_addr(addr);
 	}
 
 	fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn error::Error + 'static)) {
@@ -321,6 +334,7 @@ impl NetworkBehaviour for PeerInfoBehaviour {
 						}
 						IdentifyEvent::Error { peer_id, error } =>
 							debug!(target: "sub-libp2p", "Identification with peer {:?} failed => {}", peer_id, error),
+						IdentifyEvent::Pushed { .. } => {}
 						IdentifyEvent::Sent { .. } => {}
 					}
 				},

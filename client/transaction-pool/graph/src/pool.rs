@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,8 +21,6 @@ use std::{
 	sync::Arc,
 };
 
-use crate::{base_pool as base, watcher::Watcher};
-
 use futures::Future;
 use sp_runtime::{
 	generic::BlockId,
@@ -35,8 +33,9 @@ use sp_transaction_pool::error;
 use wasm_timer::Instant;
 use futures::channel::mpsc::Receiver;
 
+use crate::{base_pool as base, watcher::Watcher};
 use crate::validated_pool::ValidatedPool;
-pub use crate::validated_pool::ValidatedTransaction;
+pub use crate::validated_pool::{IsValidator, ValidatedTransaction};
 
 /// Modification notification event stream type;
 pub type EventStream<H> = Receiver<H>;
@@ -111,7 +110,7 @@ pub struct Options {
 
 impl Default for Options {
 	fn default() -> Self {
-		Options {
+		Self {
 			ready: base::Limit {
 				count: 8192,
 				total_bytes: 20 * 1024 * 1024,
@@ -150,9 +149,9 @@ where
 
 impl<B: ChainApi> Pool<B> {
 	/// Create a new transaction pool.
-	pub fn new(options: Options, api: Arc<B>) -> Self {
-		Pool {
-			validated_pool: Arc::new(ValidatedPool::new(options, api)),
+	pub fn new(options: Options, is_validator: IsValidator, api: Arc<B>) -> Self {
+		Self {
+			validated_pool: Arc::new(ValidatedPool::new(options, is_validator, api)),
 		}
 	}
 
@@ -193,7 +192,7 @@ impl<B: ChainApi> Pool<B> {
 		res.expect("One extrinsic passed; one result returned; qed")
 	}
 
-	/// Import a single extrinsic and starts to watch their progress in the pool.
+	/// Import a single extrinsic and starts to watch its progress in the pool.
 	pub async fn submit_and_watch(
 		&self,
 		at: &BlockId<B::Block>,
@@ -242,8 +241,8 @@ impl<B: ChainApi> Pool<B> {
 
 		// Prune all transactions that provide given tags
 		let prune_status = self.validated_pool.prune_tags(in_pool_tags)?;
-		let pruned_transactions = hashes.into_iter().cloned()
-			.chain(prune_status.pruned.iter().map(|tx| tx.hash.clone()));
+		let pruned_transactions = hashes.iter().cloned()
+			.chain(prune_status.pruned.iter().map(|tx| tx.hash));
 		self.validated_pool.fire_pruned(at, pruned_transactions)
 	}
 
@@ -337,7 +336,7 @@ impl<B: ChainApi> Pool<B> {
 		// note that `known_imported_hashes` will be rejected here due to temporary ban.
 		let pruned_hashes = prune_status.pruned
 			.iter()
-			.map(|tx| tx.hash.clone()).collect::<Vec<_>>();
+			.map(|tx| tx.hash).collect::<Vec<_>>();
 		let pruned_transactions = prune_status.pruned
 			.into_iter()
 			.map(|tx| (tx.source, tx.data.clone()));
@@ -402,7 +401,7 @@ impl<B: ChainApi> Pool<B> {
 
 		let ignore_banned = matches!(check, CheckBannedBeforeVerify::No);
 		if let Err(err) = self.validated_pool.check_is_known(&hash, ignore_banned) {
-			return (hash.clone(), ValidatedTransaction::Invalid(hash, err.into()))
+			return (hash, ValidatedTransaction::Invalid(hash, err))
 		}
 
 		let validation_result = self.validated_pool.api().validate_transaction(
@@ -413,17 +412,17 @@ impl<B: ChainApi> Pool<B> {
 
 		let status = match validation_result {
 			Ok(status) => status,
-			Err(e) => return (hash.clone(), ValidatedTransaction::Invalid(hash, e)),
+			Err(e) => return (hash, ValidatedTransaction::Invalid(hash, e)),
 		};
 
 		let validity = match status {
 			Ok(validity) => {
 				if validity.provides.is_empty() {
-					ValidatedTransaction::Invalid(hash.clone(), error::Error::NoTagsProvided.into())
+					ValidatedTransaction::Invalid(hash, error::Error::NoTagsProvided.into())
 				} else {
 					ValidatedTransaction::valid_at(
 						block_number.saturated_into::<u64>(),
-						hash.clone(),
+						hash,
 						source,
 						xt,
 						bytes,
@@ -432,9 +431,9 @@ impl<B: ChainApi> Pool<B> {
 				}
 			},
 			Err(TransactionValidityError::Invalid(e)) =>
-				ValidatedTransaction::Invalid(hash.clone(), error::Error::InvalidTransaction(e).into()),
+				ValidatedTransaction::Invalid(hash, error::Error::InvalidTransaction(e).into()),
 			Err(TransactionValidityError::Unknown(e)) =>
-				ValidatedTransaction::Unknown(hash.clone(), error::Error::UnknownTransaction(e).into()),
+				ValidatedTransaction::Unknown(hash, error::Error::UnknownTransaction(e).into()),
 		};
 
 		(hash, validity)
@@ -497,43 +496,58 @@ mod tests {
 		) -> Self::ValidationFuture {
 			let hash = self.hash_and_length(&uxt).0;
 			let block_number = self.block_id_to_number(at).unwrap().unwrap();
-			let nonce = uxt.transfer().nonce;
 
-			// This is used to control the test flow.
-			if nonce > 0 {
-				let opt = self.delay.lock().take();
-				if let Some(delay) = opt {
-					if delay.recv().is_err() {
-						println!("Error waiting for delay!");
+			let res = match uxt {
+				Extrinsic::Transfer { transfer, .. } => {
+					let nonce = transfer.nonce;
+
+					// This is used to control the test flow.
+					if nonce > 0 {
+						let opt = self.delay.lock().take();
+						if let Some(delay) = opt {
+							if delay.recv().is_err() {
+								println!("Error waiting for delay!");
+							}
+						}
 					}
-				}
-			}
 
-			if self.invalidate.lock().contains(&hash) {
-				return futures::future::ready(Ok(InvalidTransaction::Custom(0).into()));
-			}
+					if self.invalidate.lock().contains(&hash) {
+						InvalidTransaction::Custom(0).into()
+					} else if nonce < block_number {
+						InvalidTransaction::Stale.into()
+					} else {
+						let mut transaction = ValidTransaction {
+							priority: 4,
+							requires: if nonce > block_number { vec![vec![nonce as u8 - 1]] } else { vec![] },
+							provides: if nonce == INVALID_NONCE { vec![] } else { vec![vec![nonce as u8]] },
+							longevity: 3,
+							propagate: true,
+						};
 
-			futures::future::ready(if nonce < block_number {
-				Ok(InvalidTransaction::Stale.into())
-			} else {
-				let mut transaction = ValidTransaction {
-					priority: 4,
-					requires: if nonce > block_number { vec![vec![nonce as u8 - 1]] } else { vec![] },
-					provides: if nonce == INVALID_NONCE { vec![] } else { vec![vec![nonce as u8]] },
-					longevity: 3,
-					propagate: true,
-				};
+						if self.clear_requirements.lock().contains(&hash) {
+							transaction.requires.clear();
+						}
 
-				if self.clear_requirements.lock().contains(&hash) {
-					transaction.requires.clear();
-				}
+						if self.add_requirements.lock().contains(&hash) {
+							transaction.requires.push(vec![128]);
+						}
 
-				if self.add_requirements.lock().contains(&hash) {
-					transaction.requires.push(vec![128]);
-				}
+						Ok(transaction)
+					}
+				},
+				Extrinsic::IncludeData(_) => {
+					Ok(ValidTransaction {
+						priority: 9001,
+						requires: vec![],
+						provides: vec![vec![42]],
+						longevity: 9001,
+						propagate: false,
+					})
+				},
+				_ => unimplemented!(),
+			};
 
-				Ok(Ok(transaction))
-			})
+			futures::future::ready(Ok(res))
 		}
 
 		/// Returns a block number given the block id.
@@ -579,7 +593,7 @@ mod tests {
 	}
 
 	fn pool() -> Pool<TestApi> {
-		Pool::new(Default::default(), TestApi::default().into())
+		Pool::new(Default::default(), true.into(), TestApi::default().into())
 	}
 
 	#[test]
@@ -618,6 +632,26 @@ mod tests {
 
 		// then
 		assert_matches!(res.unwrap_err(), error::Error::TemporarilyBanned);
+	}
+
+	#[test]
+	fn should_reject_unactionable_transactions() {
+		// given
+		let pool = Pool::new(
+			Default::default(),
+			// the node does not author blocks
+			false.into(),
+			TestApi::default().into(),
+		);
+
+		// after validation `IncludeData` will be set to non-propagable
+		let uxt = Extrinsic::IncludeData(vec![42]);
+
+		// when
+		let res = block_on(pool.submit_one(&BlockId::Number(0), SOURCE, uxt));
+
+		// then
+		assert_matches!(res.unwrap_err(), error::Error::Unactionable);
 	}
 
 	#[test]
@@ -722,11 +756,14 @@ mod tests {
 			count: 100,
 			total_bytes: 200,
 		};
-		let pool = Pool::new(Options {
+
+		let options = Options {
 			ready: limit.clone(),
 			future: limit.clone(),
 			..Default::default()
-		}, TestApi::default().into());
+		};
+
+		let pool = Pool::new(options, true.into(), TestApi::default().into());
 
 		let hash1 = block_on(pool.submit_one(&BlockId::Number(0), SOURCE, uxt(Transfer {
 			from: AccountId::from_h256(H256::from_low_u64_be(1)),
@@ -757,11 +794,14 @@ mod tests {
 			count: 100,
 			total_bytes: 10,
 		};
-		let pool = Pool::new(Options {
+
+		let options = Options {
 			ready: limit.clone(),
 			future: limit.clone(),
 			..Default::default()
-		}, TestApi::default().into());
+		};
+
+		let pool = Pool::new(options, true.into(), TestApi::default().into());
 
 		// when
 		block_on(pool.submit_one(&BlockId::Number(0), SOURCE, uxt(Transfer {
@@ -939,11 +979,13 @@ mod tests {
 				count: 1,
 				total_bytes: 1000,
 			};
-			let pool = Pool::new(Options {
+			let options = Options {
 				ready: limit.clone(),
 				future: limit.clone(),
 				..Default::default()
-			}, TestApi::default().into());
+			};
+
+			let pool = Pool::new(options, true.into(), TestApi::default().into());
 
 			let xt = uxt(Transfer {
 				from: AccountId::from_h256(H256::from_low_u64_be(1)),
@@ -977,7 +1019,7 @@ mod tests {
 			let (tx, rx) = std::sync::mpsc::sync_channel(1);
 			let mut api = TestApi::default();
 			api.delay = Arc::new(Mutex::new(rx.into()));
-			let pool = Arc::new(Pool::new(Default::default(), api.into()));
+			let pool = Arc::new(Pool::new(Default::default(), true.into(), api.into()));
 
 			// when
 			let xt = uxt(Transfer {

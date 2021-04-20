@@ -1,23 +1,25 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{DeriveInput, Ident, Error};
-use proc_macro_crate::crate_name;
+use proc_macro_crate::{crate_name, FoundCrate};
 
 const CRATE_NAME: &str = "sc-chain-spec";
 const ATTRIBUTE_NAME: &str = "forks";
@@ -75,7 +77,8 @@ pub fn group_derive(ast: &DeriveInput) -> proc_macro::TokenStream {
 		let combine_with = generate_combine_with(&field_names);
 		let to_base = generate_fork_to_base(name, &field_names);
 		let serde_crate_name = match proc_macro_crate::crate_name("serde") {
-			Ok(name) => Ident::new(&name.replace("-", "_"), Span::call_site()),
+			Ok(FoundCrate::Itself) => Ident::new("serde", Span::call_site()),
+			Ok(FoundCrate::Name(name)) => Ident::new(&name, Span::call_site()),
 			Err(e) => {
 				let err = Error::new(
 					Span::call_site(),
@@ -149,14 +152,11 @@ pub fn derive(
 		_ => return err(),
 	};
 
-	const PROOF: &str = "CARGO_PKG_NAME always defined when compiling; qed";
 	let name = &ast.ident;
 	let crate_name = match crate_name(CRATE_NAME) {
-		Ok(chain_spec_name) => chain_spec_name,
-		Err(e) => if std::env::var("CARGO_PKG_NAME").expect(PROOF) == CRATE_NAME {
-			// we return the name of the crate here instead of `crate` to support doc tests.
-			CRATE_NAME.replace("-", "_")
-		} else {
+		Ok(FoundCrate::Itself) => CRATE_NAME.replace("-", "_"),
+		Ok(FoundCrate::Name(chain_spec_name)) => chain_spec_name,
+		Err(e) => {
 			let err = Error::new(Span::call_site(), &e).to_compile_error();
 			return quote!( #err ).into()
 		},

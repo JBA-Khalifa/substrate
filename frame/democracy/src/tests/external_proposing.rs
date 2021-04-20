@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -93,7 +93,7 @@ fn external_blacklisting_should_work() {
 		assert_ok!(Democracy::blacklist(Origin::root(), hash, None));
 
 		fast_forward_to(2);
-		assert!(Democracy::referendum_status(0).is_err());
+		assert_noop!(Democracy::referendum_status(0), Error::<Test>::ReferendumInvalid);
 
 		assert_noop!(
 			Democracy::external_propose(

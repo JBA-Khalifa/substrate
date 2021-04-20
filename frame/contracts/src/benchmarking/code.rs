@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,15 +24,15 @@
 //! we define this simple definition of a contract that can be passed to `create_code` that
 //! compiles it down into a `WasmModule` that can be used as a contract's code.
 
-use crate::Config;
-use crate::Module as Contracts;
-
-use parity_wasm::elements::{Instruction, Instructions, FuncBody, ValueType, BlockType};
+use crate::{Config, CurrentSchedule};
+use parity_wasm::elements::{
+	Instruction, Instructions, FuncBody, ValueType, BlockType, Section, CustomSection,
+};
 use pwasm_utils::stack_height::inject_limiter;
 use sp_core::crypto::UncheckedFrom;
 use sp_runtime::traits::Hash;
 use sp_sandbox::{EnvironmentDefinitionBuilder, Memory};
-use sp_std::{prelude::*, convert::TryFrom};
+use sp_std::{prelude::*, convert::TryFrom, borrow::ToOwned};
 
 /// Pass to `create_code` in order to create a compiled `WasmModule`.
 ///
@@ -66,6 +66,10 @@ pub struct ModuleDefinition {
 	pub inject_stack_metering: bool,
 	/// Create a table containing function pointers.
 	pub table: Option<TableSegment>,
+	/// Create a section named "dummy" of the specified size. This is useful in order to
+	/// benchmark the overhead of loading and storing codes of specified sizes. The dummy
+	/// section only contributes to the size of the contract but does not affect execution.
+	pub dummy_section: u32,
 }
 
 pub struct TableSegment {
@@ -103,7 +107,7 @@ pub struct ImportedFunction {
 	pub return_type: Option<ValueType>,
 }
 
-/// A wasm module ready to be put on chain with `put_code`.
+/// A wasm module ready to be put on chain.
 #[derive(Clone)]
 pub struct WasmModule<T:Config> {
 	pub code: Vec<u8>,
@@ -124,14 +128,14 @@ where
 		let mut contract = parity_wasm::builder::module()
 			// deploy function (first internal function)
 			.function()
-				.signature().with_return_type(None).build()
+				.signature().build()
 				.with_body(def.deploy_body.unwrap_or_else(||
 					FuncBody::new(Vec::new(), Instructions::empty())
 				))
 				.build()
 			// call function (second internal function)
 			.function()
-				.signature().with_return_type(None).build()
+				.signature().build()
 				.with_body(def.call_body.unwrap_or_else(||
 					FuncBody::new(Vec::new(), Instructions::empty())
 				))
@@ -143,7 +147,7 @@ where
 		if let Some(body) = def.aux_body {
 			let mut signature = contract
 				.function()
-				.signature().with_return_type(None);
+				.signature();
 			for _ in 0 .. def.aux_arg_num {
 				signature = signature.with_param(ValueType::I64);
 			}
@@ -162,7 +166,7 @@ where
 		for func in def.imported_functions {
 			let sig = parity_wasm::builder::signature()
 				.with_params(func.params)
-				.with_return_type(func.return_type)
+				.with_results(func.return_type.into_iter().collect())
 				.build_sig();
 			let sig = contract.push_signature(sig);
 			contract = contract.import()
@@ -204,13 +208,22 @@ where
 				.build();
 		}
 
+		// Add the dummy section
+		if def.dummy_section > 0 {
+			contract = contract.with_section(
+				Section::Custom(
+					CustomSection::new("dummy".to_owned(), vec![42; def.dummy_section as usize])
+				)
+			);
+		}
+
 		let mut code = contract.build();
 
 		// Inject stack height metering
 		if def.inject_stack_metering {
 			code = inject_limiter(
 				code,
-				Contracts::<T>::current_schedule().limits.stack_height
+				<CurrentSchedule<T>>::get().limits.stack_height
 			)
 			.unwrap();
 		}
@@ -235,26 +248,27 @@ where
 		ModuleDefinition::default().into()
 	}
 
-	/// Same as `dummy` but with maximum sized linear memory.
-	pub fn dummy_with_mem() -> Self {
+	/// Same as `dummy` but with maximum sized linear memory and a dummy section of specified size.
+	pub fn dummy_with_bytes(dummy_bytes: u32) -> Self {
 		ModuleDefinition {
 			memory: Some(ImportedMemory::max::<T>()),
+			dummy_section: dummy_bytes,
 			.. Default::default()
 		}
 		.into()
 	}
 
 	/// Creates a wasm module of `target_bytes` size. Used to benchmark the performance of
-	/// `put_code` for different sizes of wasm modules. The generated module maximizes
+	/// `instantiate_with_code` for different sizes of wasm modules. The generated module maximizes
 	/// instrumentation runtime by nesting blocks as deeply as possible given the byte budget.
 	pub fn sized(target_bytes: u32) -> Self {
 		use parity_wasm::elements::Instruction::{If, I32Const, Return, End};
-		// Base size of a contract is 47 bytes and each expansion adds 6 bytes.
+		// Base size of a contract is 63 bytes and each expansion adds 6 bytes.
 		// We do one expansion less to account for the code section and function body
 		// size fields inside the binary wasm module representation which are leb128 encoded
 		// and therefore grow in size when the contract grows. We are not allowed to overshoot
-		// because of the maximum code size that is enforced by `put_code`.
-		let expansions = (target_bytes.saturating_sub(47) / 6).saturating_sub(1);
+		// because of the maximum code size that is enforced by `instantiate_with_code`.
+		let expansions = (target_bytes.saturating_sub(63) / 6).saturating_sub(1);
 		const EXPANSION: [Instruction; 4] = [
 			I32Const(0),
 			If(BlockType::NoResult),
@@ -263,6 +277,7 @@ where
 		];
 		ModuleDefinition {
 			call_body: Some(body::repeated(expansions, &EXPANSION)),
+			memory: Some(ImportedMemory::max::<T>()),
 			.. Default::default()
 		}
 		.into()
@@ -435,11 +450,11 @@ pub mod body {
 						vec![Instruction::I32Const(current as i32)]
 					},
 					DynInstr::RandomUnaligned(low, high) => {
-						let unaligned = rng.gen_range(*low, *high) | 1;
+						let unaligned = rng.gen_range(*low..*high) | 1;
 						vec![Instruction::I32Const(unaligned as i32)]
 					},
 					DynInstr::RandomI32(low, high) => {
-						vec![Instruction::I32Const(rng.gen_range(*low, *high))]
+						vec![Instruction::I32Const(rng.gen_range(*low..*high))]
 					},
 					DynInstr::RandomI32Repeated(num) => {
 						(&mut rng).sample_iter(Standard).take(*num).map(|val|
@@ -454,19 +469,19 @@ pub mod body {
 						.collect()
 					},
 					DynInstr::RandomGetLocal(low, high) => {
-						vec![Instruction::GetLocal(rng.gen_range(*low, *high))]
+						vec![Instruction::GetLocal(rng.gen_range(*low..*high))]
 					},
 					DynInstr::RandomSetLocal(low, high) => {
-						vec![Instruction::SetLocal(rng.gen_range(*low, *high))]
+						vec![Instruction::SetLocal(rng.gen_range(*low..*high))]
 					},
 					DynInstr::RandomTeeLocal(low, high) => {
-						vec![Instruction::TeeLocal(rng.gen_range(*low, *high))]
+						vec![Instruction::TeeLocal(rng.gen_range(*low..*high))]
 					},
 					DynInstr::RandomGetGlobal(low, high) => {
-						vec![Instruction::GetGlobal(rng.gen_range(*low, *high))]
+						vec![Instruction::GetGlobal(rng.gen_range(*low..*high))]
 					},
 					DynInstr::RandomSetGlobal(low, high) => {
-						vec![Instruction::SetGlobal(rng.gen_range(*low, *high))]
+						vec![Instruction::SetGlobal(rng.gen_range(*low..*high))]
 					},
 				}
 			)
@@ -488,5 +503,5 @@ where
 	T: Config,
 	T::AccountId: UncheckedFrom<T::Hash> + AsRef<[u8]>,
 {
-	Contracts::<T>::current_schedule().limits.memory_pages
+	<CurrentSchedule<T>>::get().limits.memory_pages
 }

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,8 +21,8 @@
 use proc_macro2::{TokenStream, Span};
 use quote::quote;
 use super::DeclStorageDefExt;
-use genesis_config_def::GenesisConfigDef;
-use builder_def::BuilderDef;
+pub use genesis_config_def::GenesisConfigDef;
+pub use builder_def::BuilderDef;
 
 mod genesis_config_def;
 mod builder_def;
@@ -65,6 +65,7 @@ fn decl_genesis_config_and_impl_default(
 	let genesis_struct = &genesis_config.genesis_struct;
 	let genesis_impl = &genesis_config.genesis_impl;
 	let genesis_where_clause = &genesis_config.genesis_where_clause;
+	let serde_crate = format!("{}::serde", scrate);
 
 	quote!(
 		/// Genesis config for the module, allow to build genesis storage.
@@ -72,6 +73,7 @@ fn decl_genesis_config_and_impl_default(
 		#[cfg(feature = "std")]
 		#[serde(rename_all = "camelCase")]
 		#[serde(deny_unknown_fields)]
+		#[serde(crate = #serde_crate)]
 		#serde_bug_bound
 		pub struct GenesisConfig#genesis_struct_decl #genesis_where_clause {
 			#( #config_fields )*

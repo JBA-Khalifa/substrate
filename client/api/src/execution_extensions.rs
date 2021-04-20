@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Execution extensions for runtime calls.
 //!
@@ -24,7 +26,7 @@ use std::sync::{Weak, Arc};
 use codec::Decode;
 use sp_core::{
 	ExecutionContext,
-	offchain::{self, OffchainExt, TransactionPoolExt},
+	offchain::{self, OffchainWorkerExt, TransactionPoolExt, OffchainDbExt},
 };
 use sp_keystore::{KeystoreExt, SyncCryptoStorePtr};
 use sp_runtime::{
@@ -74,6 +76,18 @@ impl ExtensionsFactory for () {
 	}
 }
 
+/// Create a Offchain DB accessor object.
+pub trait DbExternalitiesFactory: Send + Sync {
+	/// Create [`offchain::DbExternalities`] instance.
+	fn create(&self) -> Box<dyn offchain::DbExternalities>;
+}
+
+impl<T: offchain::DbExternalities + Clone + Sync + Send + 'static> DbExternalitiesFactory for T {
+	fn create(&self) -> Box<dyn offchain::DbExternalities> {
+		Box::new(self.clone())
+	}
+}
+
 /// A producer of execution extensions for offchain calls.
 ///
 /// This crate aggregates extensions available for the offchain calls
@@ -82,6 +96,7 @@ impl ExtensionsFactory for () {
 pub struct ExecutionExtensions<Block: traits::Block> {
 	strategies: ExecutionStrategies,
 	keystore: Option<SyncCryptoStorePtr>,
+	offchain_db: Option<Box<dyn DbExternalitiesFactory>>,
 	// FIXME: these two are only RwLock because of https://github.com/paritytech/substrate/issues/4587
 	//        remove when fixed.
 	// To break retain cycle between `Client` and `TransactionPool` we require this
@@ -97,6 +112,7 @@ impl<Block: traits::Block> Default for ExecutionExtensions<Block> {
 		Self {
 			strategies: Default::default(),
 			keystore: None,
+			offchain_db: None,
 			transaction_pool: RwLock::new(None),
 			extensions_factory: RwLock::new(Box::new(())),
 		}
@@ -108,12 +124,14 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 	pub fn new(
 		strategies: ExecutionStrategies,
 		keystore: Option<SyncCryptoStorePtr>,
+		offchain_db: Option<Box<dyn DbExternalitiesFactory>>,
 	) -> Self {
 		let transaction_pool = RwLock::new(None);
 		let extensions_factory = Box::new(());
 		Self {
 			strategies,
 			keystore,
+			offchain_db,
 			extensions_factory: RwLock::new(extensions_factory),
 			transaction_pool,
 		}
@@ -162,9 +180,22 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 			}
 		}
 
+		if capabilities.has(offchain::Capability::OffchainDbRead) ||
+			capabilities.has(offchain::Capability::OffchainDbWrite)
+		{
+			if let Some(offchain_db) = self.offchain_db.as_ref() {
+				extensions.register(
+					OffchainDbExt::new(offchain::LimitedExternalities::new(
+						capabilities,
+						offchain_db.create(),
+					))
+				);
+			}
+		}
+
 		if let ExecutionContext::OffchainCall(Some(ext)) = context {
 			extensions.register(
-				OffchainExt::new(offchain::LimitedExternalities::new(capabilities, ext.0)),
+				OffchainWorkerExt::new(offchain::LimitedExternalities::new(capabilities, ext.0)),
 			);
 		}
 
@@ -211,7 +242,7 @@ impl<Block: traits::Block> offchain::TransactionPool for TransactionPoolAdapter<
 		let xt = match Block::Extrinsic::decode(&mut &*data) {
 			Ok(xt) => xt,
 			Err(e) => {
-				log::warn!("Unable to decode extrinsic: {:?}: {}", data, e.what());
+				log::warn!("Unable to decode extrinsic: {:?}: {}", data, e);
 				return Err(());
 			},
 		};

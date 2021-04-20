@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -97,6 +97,8 @@ pub(crate) fn create_and_compile(
 	project_cargo_toml: &Path,
 	default_rustflags: &str,
 	cargo_cmd: CargoCommandVersioned,
+	features_to_enable: Vec<String>,
+	wasm_binary_name: Option<String>,
 ) -> (Option<WasmBinary>, WasmBinaryBloaty) {
 	let wasm_workspace_root = get_wasm_workspace_root();
 	let wasm_workspace = wasm_workspace_root.join("wbuild");
@@ -108,21 +110,27 @@ pub(crate) fn create_and_compile(
 		&wasm_workspace,
 		&crate_metadata,
 		&crate_metadata.workspace_root,
+		features_to_enable,
 	);
 
 	build_project(&project, default_rustflags, cargo_cmd);
-	let (wasm_binary, bloaty) = compact_wasm_file(
+	let (wasm_binary, wasm_binary_compressed, bloaty) = compact_wasm_file(
 		&project,
 		project_cargo_toml,
+		wasm_binary_name,
 	);
 
 	wasm_binary.as_ref().map(|wasm_binary|
 		copy_wasm_to_target_directory(project_cargo_toml, wasm_binary)
 	);
 
+	wasm_binary_compressed.as_ref().map(|wasm_binary_compressed|
+		copy_wasm_to_target_directory(project_cargo_toml, wasm_binary_compressed)
+	);
+
 	generate_rerun_if_changed_instructions(project_cargo_toml, &project, &wasm_workspace);
 
-	(wasm_binary, bloaty)
+	(wasm_binary_compressed.or(wasm_binary), bloaty)
 }
 
 /// Find the `Cargo.lock` relative to the `OUT_DIR` environment variable.
@@ -199,7 +207,7 @@ fn create_project_cargo_toml(
 	crate_name: &str,
 	crate_path: &Path,
 	wasm_binary: &str,
-	enabled_features: &[String],
+	enabled_features: impl Iterator<Item = String>,
 ) {
 	let mut workspace_toml: Table = toml::from_str(
 		&fs::read_to_string(
@@ -250,6 +258,7 @@ fn create_project_cargo_toml(
 	package.insert("name".into(), format!("{}-wasm", crate_name).into());
 	package.insert("version".into(), "1.0.0".into());
 	package.insert("edition".into(), "2018".into());
+	package.insert("resolver".into(), "2".into());
 
 	wasm_workspace_toml.insert("package".into(), package.into());
 
@@ -265,7 +274,7 @@ fn create_project_cargo_toml(
 	wasm_project.insert("package".into(), crate_name.into());
 	wasm_project.insert("path".into(), crate_path.display().to_string().into());
 	wasm_project.insert("default-features".into(), false.into());
-	wasm_project.insert("features".into(), enabled_features.to_vec().into());
+	wasm_project.insert("features".into(), enabled_features.collect::<Vec<_>>().into());
 
 	dependencies.insert("wasm-project".into(), wasm_project.into());
 
@@ -339,6 +348,7 @@ fn create_project(
 	wasm_workspace: &Path,
 	crate_metadata: &Metadata,
 	workspace_root_path: &Path,
+	features_to_enable: Vec<String>,
 ) -> PathBuf {
 	let crate_name = get_crate_name(project_cargo_toml);
 	let crate_path = project_cargo_toml.parent().expect("Parent path exists; qed");
@@ -354,13 +364,16 @@ fn create_project(
 		enabled_features.push("runtime-wasm".into());
 	}
 
+	let mut enabled_features = enabled_features.into_iter().collect::<HashSet<_>>();
+	enabled_features.extend(features_to_enable.into_iter());
+
 	create_project_cargo_toml(
 		&wasm_project_folder,
 		workspace_root_path,
 		&crate_name,
 		&crate_path,
 		&wasm_binary,
-		&enabled_features,
+		enabled_features.into_iter(),
 	);
 
 	write_file_if_changed(
@@ -404,7 +417,7 @@ fn build_project(project: &Path, default_rustflags: &str, cargo_cmd: CargoComman
 		env::var(crate::WASM_BUILD_RUSTFLAGS_ENV).unwrap_or_default(),
 	);
 
-	build_cmd.args(&["-Zfeatures=build_dep", "rustc", "--target=wasm32-unknown-unknown"])
+	build_cmd.args(&["rustc", "--target=wasm32-unknown-unknown"])
 		.arg(format!("--manifest-path={}", manifest_path.display()))
 		.env("RUSTFLAGS", rustflags)
 		// Unset the `CARGO_TARGET_DIR` to prevent a cargo deadlock (cargo locks a target dir exclusive).
@@ -433,20 +446,26 @@ fn build_project(project: &Path, default_rustflags: &str, cargo_cmd: CargoComman
 	}
 }
 
-/// Compact the WASM binary using `wasm-gc`. Returns the path to the bloaty WASM binary.
+/// Compact the WASM binary using `wasm-gc` and compress it using zstd.
 fn compact_wasm_file(
 	project: &Path,
 	cargo_manifest: &Path,
-) -> (Option<WasmBinary>, WasmBinaryBloaty) {
+	wasm_binary_name: Option<String>,
+) -> (Option<WasmBinary>, Option<WasmBinary>, WasmBinaryBloaty) {
 	let is_release_build = is_release_build();
 	let target = if is_release_build { "release" } else { "debug" };
-	let wasm_binary = get_wasm_binary_name(cargo_manifest);
+	let default_wasm_binary_name = get_wasm_binary_name(cargo_manifest);
 	let wasm_file = project.join("target/wasm32-unknown-unknown")
 		.join(target)
-		.join(format!("{}.wasm", wasm_binary));
+		.join(format!("{}.wasm", default_wasm_binary_name));
 
 	let wasm_compact_file = if is_release_build {
-		let wasm_compact_file = project.join(format!("{}.compact.wasm", wasm_binary));
+		let wasm_compact_file = project.join(
+			format!(
+				"{}.compact.wasm",
+				wasm_binary_name.clone().unwrap_or_else(|| default_wasm_binary_name.clone()),
+			)
+		);
 		wasm_gc::garbage_collect_file(&wasm_file, &wasm_compact_file)
 			.expect("Failed to compact generated WASM binary.");
 		Some(WasmBinary(wasm_compact_file))
@@ -454,7 +473,64 @@ fn compact_wasm_file(
 		None
 	};
 
-	(wasm_compact_file, WasmBinaryBloaty(wasm_file))
+	let wasm_compact_compressed_file = wasm_compact_file.as_ref()
+		.and_then(|compact_binary| {
+			let file_name = wasm_binary_name.clone()
+				.unwrap_or_else(|| default_wasm_binary_name.clone());
+
+			let wasm_compact_compressed_file = project.join(
+				format!(
+					"{}.compact.compressed.wasm",
+					file_name,
+				)
+			);
+
+			if compress_wasm(&compact_binary.0, &wasm_compact_compressed_file) {
+				Some(WasmBinary(wasm_compact_compressed_file))
+			} else {
+				None
+			}
+		});
+
+	let bloaty_file_name = if let Some(name) = wasm_binary_name {
+		format!("{}.wasm", name)
+	} else {
+		format!("{}.wasm", default_wasm_binary_name)
+	};
+
+	let bloaty_file = project.join(bloaty_file_name);
+	fs::copy(wasm_file, &bloaty_file).expect("Copying the bloaty file to the project dir.");
+
+	(
+		wasm_compact_file,
+		wasm_compact_compressed_file,
+		WasmBinaryBloaty(bloaty_file),
+	)
+}
+
+fn compress_wasm(
+	wasm_binary_path: &Path,
+	compressed_binary_out_path: &Path,
+) -> bool {
+	use sp_maybe_compressed_blob::CODE_BLOB_BOMB_LIMIT;
+
+	let data = fs::read(wasm_binary_path).expect("Failed to read WASM binary");
+	if let Some(compressed) = sp_maybe_compressed_blob::compress(
+		&data,
+		CODE_BLOB_BOMB_LIMIT,
+	) {
+		fs::write(compressed_binary_out_path, &compressed[..])
+			.expect("Failed to write WASM binary");
+
+		true
+	} else {
+		println!(
+			"cargo:warning=Writing uncompressed wasm. Exceeded maximum size {}",
+			CODE_BLOB_BOMB_LIMIT,
+		);
+
+		false
+	}
 }
 
 /// Custom wrapper for a [`cargo_metadata::Package`] to store it in

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use sp_runtime::{Justification, generic::BlockId};
+use sp_runtime::{Justifications, generic::BlockId};
 use sp_runtime::traits::{Block as BlockT, Header as HeaderT, NumberFor, Zero};
 
 use sp_blockchain::{
@@ -109,7 +109,7 @@ impl<S, Block> BlockchainBackend<Block> for Blockchain<S> where Block: BlockT, S
 		Err(ClientError::NotAvailableOnLightClient)
 	}
 
-	fn justification(&self, _id: BlockId<Block>) -> ClientResult<Option<Justification>> {
+	fn justifications(&self, _id: BlockId<Block>) -> ClientResult<Option<Justifications>> {
 		Err(ClientError::NotAvailableOnLightClient)
 	}
 
@@ -126,6 +126,13 @@ impl<S, Block> BlockchainBackend<Block> for Blockchain<S> where Block: BlockT, S
 	}
 
 	fn children(&self, _parent_hash: Block::Hash) -> ClientResult<Vec<Block::Hash>> {
+		Err(ClientError::NotAvailableOnLightClient)
+	}
+
+	fn indexed_transaction(
+		&self,
+		_hash: &Block::Hash,
+	) -> ClientResult<Option<Vec<u8>>> {
 		Err(ClientError::NotAvailableOnLightClient)
 	}
 }

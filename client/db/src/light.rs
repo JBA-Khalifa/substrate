@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -756,7 +756,7 @@ pub(crate) mod tests {
 	#[test]
 	fn finalized_ancient_headers_are_replaced_with_cht() {
 		fn insert_headers<F: Fn(&Hash, u64) -> Header>(header_producer: F) ->
-			(Arc<sp_database::MemDb<DbHash>>, LightStorage<Block>)
+			(Arc<sp_database::MemDb>, LightStorage<Block>)
 		{
 			let raw_db = Arc::new(sp_database::MemDb::default());
 			let db = LightStorage::from_kvdb(raw_db.clone()).unwrap();

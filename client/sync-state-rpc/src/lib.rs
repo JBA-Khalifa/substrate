@@ -1,18 +1,20 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! A RPC handler to create sync states for light clients.
 //! Currently only usable with BABE + GRANDPA.
@@ -35,7 +37,7 @@ type SharedEpochChanges<TBl> = sc_consensus_epochs::SharedEpochChanges<TBl, sc_c
 enum Error<Block: BlockT> {
 	#[error(transparent)]
 	Blockchain(#[from] sp_blockchain::Error),
-	
+
 	#[error("Failed to load the block weight for block {0:?}")]
 	LoadingBlockWeightFailed(<Block as BlockT>::Hash),
 
@@ -92,7 +94,7 @@ impl<TBl, TCl> SyncStateRpcHandler<TBl, TCl>
 			chain_spec, client, shared_authority_set, shared_epoch_changes, deny_unsafe,
 		}
 	}
-	
+
 	fn build_sync_state(&self) -> Result<sc_chain_spec::LightSyncState<TBl>, Error<TBl>> {
 		let finalized_hash = self.client.info().finalized_hash;
 		let finalized_header = self.client.header(BlockId::Hash(finalized_hash))?
@@ -106,7 +108,7 @@ impl<TBl, TCl> SyncStateRpcHandler<TBl, TCl>
 
 		Ok(sc_chain_spec::LightSyncState {
 			finalized_block_header: finalized_header,
-			babe_epoch_changes: self.shared_epoch_changes.lock().clone(),
+			babe_epoch_changes: self.shared_epoch_changes.shared_data().clone(),
 			babe_finalized_block_weight: finalized_block_weight,
 			grandpa_authority_set: self.shared_authority_set.clone_inner(),
 		})

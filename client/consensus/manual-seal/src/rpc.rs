@@ -1,18 +1,20 @@
-// Copyright 2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! RPC interface for the `ManualSeal` Engine.
 
@@ -26,7 +28,7 @@ use futures::{
 	SinkExt
 };
 use serde::{Deserialize, Serialize};
-use sp_runtime::Justification;
+use sp_runtime::EncodedJustification;
 pub use self::gen_client::Client as ManualSealClient;
 
 /// Future's type for jsonrpc
@@ -60,7 +62,7 @@ pub enum EngineCommand<Hash> {
 		/// sender to report errors/success to the rpc.
 		sender: Sender<()>,
 		/// finalization justification
-		justification: Option<Justification>,
+		justification: Option<EncodedJustification>,
 	}
 }
 
@@ -81,7 +83,7 @@ pub trait ManualSealApi<Hash> {
 	fn finalize_block(
 		&self,
 		hash: Hash,
-		justification: Option<Justification>
+		justification: Option<EncodedJustification>
 	) -> FutureResult<bool>;
 }
 
@@ -129,7 +131,7 @@ impl<Hash: Send + 'static> ManualSealApi<Hash> for ManualSeal<Hash> {
 		Box::new(future.map_err(Error::from).compat())
 	}
 
-	fn finalize_block(&self, hash: Hash, justification: Option<Justification>) -> FutureResult<bool> {
+	fn finalize_block(&self, hash: Hash, justification: Option<EncodedJustification>) -> FutureResult<bool> {
 		let mut sink = self.import_block_channel.clone();
 		let future = async move {
 			let (sender, receiver) = oneshot::channel();

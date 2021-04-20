@@ -1,18 +1,19 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Decimal Fixed Point implementations for Substrate runtime.
 
@@ -91,7 +92,7 @@ pub trait FixedPointNumber:
 	///
 	/// Returns `None` if `int` exceeds accuracy.
 	fn checked_from_integer(int: Self::Inner) -> Option<Self> {
-		int.checked_mul(&Self::DIV).map(|inner| Self::from_inner(inner))
+		int.checked_mul(&Self::DIV).map(Self::from_inner)
 	}
 
 	/// Creates `self` from a rational number. Equal to `n / d`.
@@ -118,7 +119,7 @@ pub trait FixedPointNumber:
 
 		multiply_by_rational(n.value, Self::DIV.unique_saturated_into(), d.value).ok()
 			.and_then(|value| from_i129(I129 { value, negative }))
-			.map(|inner| Self::from_inner(inner))
+			.map(Self::from_inner)
 	}
 
 	/// Checked multiplication for integer type `N`. Equal to `self * n`.
@@ -183,7 +184,7 @@ pub trait FixedPointNumber:
 		if inner >= Self::Inner::zero() {
 			self
 		} else {
-			Self::from_inner(inner.checked_neg().unwrap_or_else(|| Self::Inner::max_value()))
+			Self::from_inner(inner.checked_neg().unwrap_or_else(Self::Inner::max_value))
 		}
 	}
 
@@ -229,7 +230,7 @@ pub trait FixedPointNumber:
 		self.into_inner().checked_div(&Self::DIV)
 			.expect("panics only if DIV is zero, DIV is not zero; qed")
 			.checked_mul(&Self::DIV)
-			.map(|inner| Self::from_inner(inner))
+			.map(Self::from_inner)
 			.expect("can not overflow since fixed number is >= integer part")
 	}
 
@@ -253,12 +254,10 @@ pub trait FixedPointNumber:
 	fn ceil(self) -> Self {
 		if self.is_negative() {
 			self.trunc()
+		} else if self.frac() == Self::zero() {
+			self
 		} else {
-			if self.frac() == Self::zero() {
-				self
-			} else {
-				self.saturating_add(Self::one()).trunc()
-			}
+			self.saturating_add(Self::one()).trunc()
 		}
 	}
 
@@ -280,12 +279,10 @@ pub trait FixedPointNumber:
 		let n = self.frac().saturating_mul(Self::saturating_from_integer(10));
 		if n < Self::saturating_from_integer(5) {
 			self.trunc()
+		} else if self.is_positive() {
+			self.saturating_add(Self::one()).trunc()
 		} else {
-			if self.is_positive() {
-				self.saturating_add(Self::one()).trunc()
-			} else {
-				self.saturating_sub(Self::one()).trunc()
-			}
+			self.saturating_sub(Self::one()).trunc()
 		}
 	}
 }
@@ -379,12 +376,12 @@ macro_rules! implement_fixed {
 			}
 
 			#[cfg(any(feature = "std", test))]
-			pub fn from_fraction(x: f64) -> Self {
+			pub fn from_float(x: f64) -> Self {
 				Self((x * (<Self as FixedPointNumber>::DIV as f64)) as $inner_type)
 			}
 
 			#[cfg(any(feature = "std", test))]
-			pub fn to_fraction(self) -> f64 {
+			pub fn to_float(self) -> f64 {
 				self.0 as f64 / <Self as FixedPointNumber>::DIV as f64
 			}
 		}
@@ -584,7 +581,7 @@ macro_rules! implement_fixed {
 			{
 				use sp_std::str::FromStr;
 				let s = String::deserialize(deserializer)?;
-				$name::from_str(&s).map_err(|err_str| de::Error::custom(err_str))
+				$name::from_str(&s).map_err(de::Error::custom)
 			}
 		}
 

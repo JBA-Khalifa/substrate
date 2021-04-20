@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Substrate offchain workers.
 //!
@@ -44,13 +46,13 @@ use sp_api::{ApiExt, ProvideRuntimeApi};
 use futures::future::Future;
 use log::{debug, warn};
 use sc_network::{ExHashT, NetworkService, NetworkStateInfo, PeerId};
-use sp_core::{offchain::{self, OffchainStorage}, ExecutionContext, traits::SpawnNamed};
+use sp_core::{offchain, ExecutionContext, traits::SpawnNamed};
 use sp_runtime::{generic::BlockId, traits::{self, Header}};
 use futures::{prelude::*, future::ready};
 
 mod api;
-use api::SharedClient;
 
+pub use api::Db as OffchainDb;
 pub use sp_offchain::{OffchainWorkerApi, STORAGE_PREFIX};
 
 /// NetworkProvider provides [`OffchainWorkers`] with all necessary hooks into the
@@ -58,7 +60,7 @@ pub use sp_offchain::{OffchainWorkerApi, STORAGE_PREFIX};
 pub trait NetworkProvider: NetworkStateInfo {
 	/// Set the authorized peers.
 	fn set_authorized_peers(&self, peers: HashSet<PeerId>);
-	
+
 	/// Set the authorized only flag.
 	fn set_authorized_only(&self, reserved_only: bool);
 }
@@ -78,21 +80,19 @@ where
 }
 
 /// An offchain workers manager.
-pub struct OffchainWorkers<Client, Storage, Block: traits::Block> {
+pub struct OffchainWorkers<Client, Block: traits::Block> {
 	client: Arc<Client>,
-	db: Storage,
 	_block: PhantomData<Block>,
 	thread_pool: Mutex<ThreadPool>,
-	shared_client: SharedClient,
+	shared_client: api::SharedClient,
 }
 
-impl<Client, Storage, Block: traits::Block> OffchainWorkers<Client, Storage, Block> {
+impl<Client, Block: traits::Block> OffchainWorkers<Client, Block> {
 	/// Creates new `OffchainWorkers`.
-	pub fn new(client: Arc<Client>, db: Storage) -> Self {
-		let shared_client = SharedClient::new();
+	pub fn new(client: Arc<Client>) -> Self {
+		let shared_client = api::SharedClient::new();
 		Self {
 			client,
-			db,
 			_block: PhantomData,
 			thread_pool: Mutex::new(ThreadPool::new(num_cpus::get())),
 			shared_client,
@@ -100,9 +100,8 @@ impl<Client, Storage, Block: traits::Block> OffchainWorkers<Client, Storage, Blo
 	}
 }
 
-impl<Client, Storage, Block: traits::Block> fmt::Debug for OffchainWorkers<
+impl<Client, Block: traits::Block> fmt::Debug for OffchainWorkers<
 	Client,
-	Storage,
 	Block,
 > {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -110,15 +109,13 @@ impl<Client, Storage, Block: traits::Block> fmt::Debug for OffchainWorkers<
 	}
 }
 
-impl<Client, Storage, Block> OffchainWorkers<
+impl<Client, Block> OffchainWorkers<
 	Client,
-	Storage,
 	Block,
 > where
 	Block: traits::Block,
 	Client: ProvideRuntimeApi<Block> + Send + Sync + 'static,
 	Client::Api: OffchainWorkerApi<Block>,
-	Storage: OffchainStorage + 'static,
 {
 	/// Start the offchain workers after given block.
 	#[must_use]
@@ -130,10 +127,10 @@ impl<Client, Storage, Block> OffchainWorkers<
 	) -> impl Future<Output = ()> {
 		let runtime = self.client.runtime_api();
 		let at = BlockId::hash(header.hash());
-		let has_api_v1 = runtime.has_api_with::<dyn OffchainWorkerApi<Block, Error = ()>, _>(
+		let has_api_v1 = runtime.has_api_with::<dyn OffchainWorkerApi<Block>, _>(
 			&at, |v| v == 1
 		);
-		let has_api_v2 = runtime.has_api_with::<dyn OffchainWorkerApi<Block, Error = ()>, _>(
+		let has_api_v2 = runtime.has_api_with::<dyn OffchainWorkerApi<Block>, _>(
 			&at, |v| v == 2
 		);
 		let version = match (has_api_v1, has_api_v2) {
@@ -148,7 +145,6 @@ impl<Client, Storage, Block> OffchainWorkers<
 		debug!("Checking offchain workers at {:?}: version:{}", at, version);
 		if version > 0 {
 			let (api, runner) = api::AsyncApi::new(
-				self.db.clone(),
 				network_provider,
 				is_validator,
 				self.shared_client.clone(),
@@ -195,10 +191,10 @@ impl<Client, Storage, Block> OffchainWorkers<
 }
 
 /// Inform the offchain worker about new imported blocks
-pub async fn notification_future<Client, Storage, Block, Spawner>(
+pub async fn notification_future<Client, Block, Spawner>(
 	is_validator: bool,
 	client: Arc<Client>,
-	offchain: Arc<OffchainWorkers<Client, Storage, Block>>,
+	offchain: Arc<OffchainWorkers<Client, Block>>,
 	spawner: Spawner,
 	network_provider: Arc<dyn NetworkProvider + Send + Sync>,
 )
@@ -206,7 +202,6 @@ pub async fn notification_future<Client, Storage, Block, Spawner>(
 		Block: traits::Block,
 		Client: ProvideRuntimeApi<Block> + sc_client_api::BlockchainEvents<Block> + Send + Sync + 'static,
 		Client::Api: OffchainWorkerApi<Block>,
-		Storage: OffchainStorage + 'static,
 		Spawner: SpawnNamed
 {
 	client.import_notification_stream().for_each(move |n| {
@@ -236,9 +231,16 @@ mod tests {
 	use super::*;
 	use std::sync::Arc;
 	use sc_network::{Multiaddr, PeerId};
-	use substrate_test_runtime_client::{TestClient, runtime::Block};
+	use substrate_test_runtime_client::{
+		TestClient, runtime::Block, TestClientBuilderExt,
+		DefaultTestClientBuilderExt, ClientBlockImportExt,
+	};
 	use sc_transaction_pool::{BasicPool, FullChainApi};
 	use sp_transaction_pool::{TransactionPool, InPoolTransaction};
+	use sp_consensus::BlockOrigin;
+	use sc_client_api::Backend as _;
+	use sc_block_builder::BlockBuilderProvider as _;
+	use futures::executor::block_on;
 
 	struct TestNetwork();
 
@@ -287,16 +289,16 @@ mod tests {
 		let spawner = sp_core::testing::TaskExecutor::new();
 		let pool = TestPool(BasicPool::new_full(
 			Default::default(),
+			true.into(),
 			None,
 			spawner,
 			client.clone(),
 		));
-		let db = sc_client_db::offchain::LocalStorage::new_test();
 		let network = Arc::new(TestNetwork());
 		let header = client.header(&BlockId::number(0)).unwrap().unwrap();
 
 		// when
-		let offchain = OffchainWorkers::new(client, db);
+		let offchain = OffchainWorkers::new(client);
 		futures::executor::block_on(
 			offchain.on_block_imported(&header, network, false)
 		);
@@ -304,5 +306,44 @@ mod tests {
 		// then
 		assert_eq!(pool.0.status().ready, 1);
 		assert_eq!(pool.0.ready().next().unwrap().is_propagable(), false);
+	}
+
+	#[test]
+	fn offchain_index_set_and_clear_works() {
+		use sp_core::offchain::OffchainStorage;
+
+		sp_tracing::try_init_simple();
+
+		let (client, backend) =
+			substrate_test_runtime_client::TestClientBuilder::new()
+				.enable_offchain_indexing_api()
+				.build_with_backend();
+		let mut client = Arc::new(client);
+		let offchain_db = backend.offchain_storage().unwrap();
+
+		let key = &b"hello"[..];
+		let value = &b"world"[..];
+		let mut block_builder = client.new_block(Default::default()).unwrap();
+		block_builder.push(
+			substrate_test_runtime_client::runtime::Extrinsic::OffchainIndexSet(
+				key.to_vec(),
+				value.to_vec(),
+			),
+		).unwrap();
+
+		let block = block_builder.build().unwrap().block;
+		block_on(client.import(BlockOrigin::Own, block)).unwrap();
+
+		assert_eq!(value, &offchain_db.get(sp_offchain::STORAGE_PREFIX, &key).unwrap());
+
+		let mut block_builder = client.new_block(Default::default()).unwrap();
+		block_builder.push(
+			substrate_test_runtime_client::runtime::Extrinsic::OffchainIndexClear(key.to_vec()),
+		).unwrap();
+
+		let block = block_builder.build().unwrap().block;
+		block_on(client.import(BlockOrigin::Own, block)).unwrap();
+
+		assert!(offchain_db.get(sp_offchain::STORAGE_PREFIX, &key).is_none());
 	}
 }

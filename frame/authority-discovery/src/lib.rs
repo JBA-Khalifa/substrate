@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,56 +15,119 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # Authority discovery module.
+//! # Authority discovery pallet.
 //!
-//! This module is used by the `client/authority-discovery` to retrieve the
-//! current set of authorities.
+//! This pallet is used by the `client/authority-discovery` and by polkadot's parachain logic
+//! to retrieve the current and the next set of authorities.
 
 // Ensure we're `no_std` when compiling for Wasm.
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use sp_std::{collections::btree_set::BTreeSet, prelude::*};
-use frame_support::{decl_module, decl_storage};
+use sp_std::prelude::*;
+use frame_support::traits::OneSessionHandler;
+#[cfg(feature = "std")]
+use frame_support::traits::GenesisBuild;
 use sp_authority_discovery::AuthorityId;
 
-/// The module's config trait.
-pub trait Config: frame_system::Config + pallet_session::Config {}
+pub use pallet::*;
 
-decl_storage! {
-	trait Store for Module<T: Config> as AuthorityDiscovery {
-		/// Keys of the current and next authority set.
-		Keys get(fn keys): Vec<AuthorityId>;
+#[frame_support::pallet]
+pub mod pallet {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+	use super::*;
+
+	#[pallet::pallet]
+	#[pallet::generate_store(pub(super) trait Store)]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	/// The pallet's config trait.
+	pub trait Config: frame_system::Config + pallet_session::Config {}
+
+	#[pallet::storage]
+	#[pallet::getter(fn keys)]
+	/// Keys of the current authority set.
+	pub(super) type Keys<T: Config> = StorageValue<
+		_,
+		Vec<AuthorityId>,
+		ValueQuery,
+	>;
+	
+	#[pallet::storage]
+	#[pallet::getter(fn next_keys)]
+	/// Keys of the next authority set.
+	pub(super) type NextKeys<T: Config> = StorageValue<
+		_,
+		Vec<AuthorityId>,
+		ValueQuery,
+	>;
+
+	#[pallet::genesis_config]
+	pub struct GenesisConfig {
+		pub keys: Vec<AuthorityId>,
 	}
-	add_extra_genesis {
-		config(keys): Vec<AuthorityId>;
-		build(|config| Module::<T>::initialize_keys(&config.keys))
+
+	#[cfg(feature = "std")]
+	impl Default for GenesisConfig {
+		fn default() -> Self {
+			Self {
+				keys: Default::default(),
+			}
+		}
 	}
+	#[pallet::genesis_build]
+	impl<T: Config> GenesisBuild<T> for GenesisConfig {
+		fn build(&self) {
+			Pallet::<T>::initialize_keys(&self.keys)
+		}
+	}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {}
 }
 
-decl_module! {
-	pub struct Module<T: Config> for enum Call where origin: T::Origin {
-	}
-}
-
-impl<T: Config> Module<T> {
-	/// Retrieve authority identifiers of the current and next authority set.
+impl<T: Config> Pallet<T> {
+	/// Retrieve authority identifiers of the current and next authority set
+	/// sorted and deduplicated.
 	pub fn authorities() -> Vec<AuthorityId> {
-		Keys::get()
+		let mut keys = Keys::<T>::get();
+		let next = NextKeys::<T>::get();
+
+		keys.extend(next);
+		keys.sort();
+		keys.dedup();
+
+		keys
+	}
+
+	/// Retrieve authority identifiers of the current authority set in the original order.
+	pub fn current_authorities() -> Vec<AuthorityId> {
+		Keys::<T>::get()
+	}
+
+	/// Retrieve authority identifiers of the next authority set in the original order.
+	pub fn next_authorities() -> Vec<AuthorityId> {
+		NextKeys::<T>::get()
 	}
 
 	fn initialize_keys(keys: &[AuthorityId]) {
 		if !keys.is_empty() {
-			assert!(Keys::get().is_empty(), "Keys are already initialized!");
-			Keys::put(keys);
+			assert!(Keys::<T>::get().is_empty(), "Keys are already initialized!");
+			Keys::<T>::put(keys);
+			NextKeys::<T>::put(keys);
 		}
 	}
 }
 
-impl<T: Config> sp_runtime::BoundToRuntimeAppPublic for Module<T> {
+impl<T: Config> sp_runtime::BoundToRuntimeAppPublic for Pallet<T> {
 	type Public = AuthorityId;
 }
 
-impl<T: Config> pallet_session::OneSessionHandler<T::AccountId> for Module<T> {
+impl<T: Config> OneSessionHandler<T::AccountId> for Pallet<T> {
 	type Key = AuthorityId;
 
 	fn on_genesis_session<'a, I: 'a>(authorities: I)
@@ -80,8 +143,10 @@ impl<T: Config> pallet_session::OneSessionHandler<T::AccountId> for Module<T> {
 	{
 		// Remember who the authorities are for the new and next session.
 		if changed {
-			let keys = validators.chain(queued_validators).map(|x| x.1).collect::<BTreeSet<_>>();
-			Keys::put(keys.into_iter().collect::<Vec<_>>());
+			let keys = validators.map(|x| x.1);
+			Keys::<T>::put(keys.collect::<Vec<_>>());
+			let next_keys = queued_validators.map(|x| x.1);
+			NextKeys::<T>::put(next_keys.collect::<Vec<_>>());
 		}
 	}
 
@@ -90,8 +155,20 @@ impl<T: Config> pallet_session::OneSessionHandler<T::AccountId> for Module<T> {
 	}
 }
 
+#[cfg(feature = "std")]
+impl GenesisConfig {
+	/// Direct implementation of `GenesisBuild::assimilate_storage`.
+	pub fn assimilate_storage<T: Config>(
+		&self,
+		storage: &mut sp_runtime::Storage
+	) -> Result<(), String> {
+		<Self as GenesisBuild<T>>::assimilate_storage(self, storage)
+	}
+}
+
 #[cfg(test)]
 mod tests {
+	use crate as pallet_authority_discovery;
 	use super::*;
 	use sp_authority_discovery::AuthorityPair;
 	use sp_application_crypto::Pair;
@@ -101,12 +178,23 @@ mod tests {
 		testing::{Header, UintAuthorityId}, traits::{ConvertInto, IdentityLookup, OpaqueKeys},
 		Perbill, KeyTypeId,
 	};
-	use frame_support::{impl_outer_origin, parameter_types};
+	use frame_support::parameter_types;
 
-	type AuthorityDiscovery = Module<Test>;
+	type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
+	type Block = frame_system::mocking::MockBlock<Test>;
 
-	#[derive(Clone, Eq, PartialEq)]
-	pub struct Test;
+	frame_support::construct_runtime!(
+		pub enum Test where
+			Block = Block,
+			NodeBlock = Block,
+			UncheckedExtrinsic = UncheckedExtrinsic,
+		{
+			System: frame_system::{Pallet, Call, Config, Storage, Event<T>},
+			Session: pallet_session::{Pallet, Call, Storage, Event, Config<T>},
+			AuthorityDiscovery: pallet_authority_discovery::{Pallet, Call, Config},
+		}
+	);
+
 	impl Config for Test {}
 
 	parameter_types! {
@@ -118,7 +206,7 @@ mod tests {
 		type Keys = UintAuthorityId;
 		type ShouldEndSession = pallet_session::PeriodicSessions<Period, Offset>;
 		type SessionHandler = TestSessionHandler;
-		type Event = ();
+		type Event = Event;
 		type ValidatorId = AuthorityId;
 		type ValidatorIdOf = ConvertInto;
 		type DisabledValidatorsThreshold = DisabledValidatorsThreshold;
@@ -150,24 +238,22 @@ mod tests {
 		type Origin = Origin;
 		type Index = u64;
 		type BlockNumber = BlockNumber;
-		type Call = ();
+		type Call = Call;
 		type Hash = H256;
 		type Hashing = ::sp_runtime::traits::BlakeTwo256;
 		type AccountId = AuthorityId;
 		type Lookup = IdentityLookup<Self::AccountId>;
 		type Header = Header;
-		type Event = ();
+		type Event = Event;
 		type BlockHashCount = BlockHashCount;
 		type Version = ();
-		type PalletInfo = ();
+		type PalletInfo = PalletInfo;
 		type AccountData = ();
 		type OnNewAccount = ();
 		type OnKilledAccount = ();
 		type SystemWeightInfo = ();
-	}
-
-	impl_outer_origin! {
-		pub enum Origin for Test where system = frame_system {}
+		type SS58Prefix = ();
+		type OnSetCode = ();
 	}
 
 	pub struct TestSessionHandler;
@@ -188,7 +274,7 @@ mod tests {
 
 	#[test]
 	fn authorities_returns_current_and_next_authority_set() {
-		// The whole authority discovery module ignores account ids, but we still need them for
+		// The whole authority discovery pallet ignores account ids, but we still need them for
 		// `pallet_session::OneSessionHandler::on_new_session`, thus its safe to use the same value
 		// everywhere.
 		let account_id = AuthorityPair::from_seed_slice(vec![10; 32].as_ref()).unwrap().public();
@@ -223,7 +309,7 @@ mod tests {
 			.build_storage::<Test>()
 			.unwrap();
 
-		GenesisConfig {
+		pallet_authority_discovery::GenesisConfig {
 			keys: vec![],
 		}
 		.assimilate_storage::<Test>(&mut t)
@@ -233,7 +319,7 @@ mod tests {
 		let mut externalities = TestExternalities::new(t);
 
 		externalities.execute_with(|| {
-			use pallet_session::OneSessionHandler;
+			use frame_support::traits::OneSessionHandler;
 
 			AuthorityDiscovery::on_genesis_session(
 				first_authorities.iter().map(|id| (id, id.clone()))
@@ -249,8 +335,7 @@ mod tests {
 				second_authorities_and_account_ids.clone().into_iter(),
 				third_authorities_and_account_ids.clone().into_iter(),
 			);
-			let mut authorities_returned = AuthorityDiscovery::authorities();
-			authorities_returned.sort();
+			let authorities_returned = AuthorityDiscovery::authorities();
 			assert_eq!(
 				first_authorities,
 				authorities_returned,

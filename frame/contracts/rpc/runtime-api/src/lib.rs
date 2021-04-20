@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,18 +25,21 @@
 
 use codec::Codec;
 use sp_std::vec::Vec;
-use pallet_contracts_primitives::{ContractExecResult, GetStorageResult, RentProjectionResult};
+use pallet_contracts_primitives::{
+	ContractExecResult, GetStorageResult, RentProjectionResult, Code, ContractInstantiateResult,
+};
 
 sp_api::decl_runtime_apis! {
 	/// The API to interact with contracts without using executive.
-	pub trait ContractsApi<AccountId, Balance, BlockNumber> where
+	pub trait ContractsApi<AccountId, Balance, BlockNumber, Hash> where
 		AccountId: Codec,
 		Balance: Codec,
 		BlockNumber: Codec,
+		Hash: Codec,
 	{
 		/// Perform a call from a specified account to a given contract.
 		///
-		/// See the contracts' `call` dispatchable function for more details.
+		/// See [`pallet_contracts::Pallet::call`].
 		fn call(
 			origin: AccountId,
 			dest: AccountId,
@@ -44,6 +47,18 @@ sp_api::decl_runtime_apis! {
 			gas_limit: u64,
 			input_data: Vec<u8>,
 		) -> ContractExecResult;
+
+		/// Instantiate a new contract.
+		///
+		/// See [`pallet_contracts::Pallet::instantiate`].
+		fn instantiate(
+			origin: AccountId,
+			endowment: Balance,
+			gas_limit: u64,
+			code: Code<Hash>,
+			data: Vec<u8>,
+			salt: Vec<u8>,
+		) -> ContractInstantiateResult<AccountId, BlockNumber>;
 
 		/// Query a given storage key in a given contract.
 		///

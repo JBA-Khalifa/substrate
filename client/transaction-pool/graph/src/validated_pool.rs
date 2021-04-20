@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,12 +22,7 @@ use std::{
 	sync::Arc,
 };
 
-use crate::base_pool as base;
-use crate::listener::Listener;
-use crate::rotator::PoolRotator;
-use crate::watcher::Watcher;
 use serde::Serialize;
-
 use parking_lot::{Mutex, RwLock};
 use sp_runtime::{
 	generic::BlockId,
@@ -39,7 +34,10 @@ use wasm_timer::Instant;
 use futures::channel::mpsc::{channel, Sender};
 use retain_mut::RetainMut;
 
-use crate::base_pool::PruneStatus;
+use crate::base_pool::{self as base, PruneStatus};
+use crate::listener::Listener;
+use crate::rotator::PoolRotator;
+use crate::watcher::Watcher;
 use crate::pool::{
 	EventStream, Options, ChainApi, BlockHash, ExtrinsicHash, ExtrinsicFor, TransactionFor,
 };
@@ -90,9 +88,25 @@ pub type ValidatedTransactionFor<B> = ValidatedTransaction<
 	<B as ChainApi>::Error,
 >;
 
+/// A closure that returns true if the local node is a validator that can author blocks.
+pub struct IsValidator(Box<dyn Fn() -> bool + Send + Sync>);
+
+impl From<bool> for IsValidator {
+	fn from(is_validator: bool) -> Self {
+		Self(Box::new(move || is_validator))
+	}
+}
+
+impl From<Box<dyn Fn() -> bool + Send + Sync>> for IsValidator {
+	fn from(is_validator: Box<dyn Fn() -> bool + Send + Sync>) -> Self {
+		Self(is_validator)
+	}
+}
+
 /// Pool that deals with validated transactions.
 pub struct ValidatedPool<B: ChainApi> {
 	api: Arc<B>,
+	is_validator: IsValidator,
 	options: Options,
 	listener: RwLock<Listener<ExtrinsicHash<B>, B>>,
 	pool: RwLock<base::BasePool<
@@ -116,9 +130,10 @@ where
 
 impl<B: ChainApi> ValidatedPool<B> {
 	/// Create a new transaction pool.
-	pub fn new(options: Options, api: Arc<B>) -> Self {
+	pub fn new(options: Options, is_validator: IsValidator, api: Arc<B>) -> Self {
 		let base_pool = base::BasePool::new(options.reject_future_transactions);
-		ValidatedPool {
+		Self {
+			is_validator,
 			options,
 			listener: Default::default(),
 			api,
@@ -151,7 +166,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 		if !ignore_banned && self.is_banned(tx_hash) {
 			Err(error::Error::TemporarilyBanned.into())
 		} else if self.pool.read().is_imported(tx_hash) {
-			Err(error::Error::AlreadyImported(Box::new(tx_hash.clone())).into())
+			Err(error::Error::AlreadyImported(Box::new(*tx_hash)).into())
 		} else {
 			Ok(())
 		}
@@ -183,12 +198,16 @@ impl<B: ChainApi> ValidatedPool<B> {
 	fn submit_one(&self, tx: ValidatedTransactionFor<B>) -> Result<ExtrinsicHash<B>, B::Error> {
 		match tx {
 			ValidatedTransaction::Valid(tx) => {
+				if !tx.propagate && !(self.is_validator.0)() {
+					return Err(error::Error::Unactionable.into());
+				}
+
 				let imported = self.pool.write().import(tx)?;
 
 				if let base::Imported::Ready { ref hash, .. } = imported {
 					self.import_notification_sinks.lock()
 						.retain_mut(|sink| {
-							match sink.try_send(hash.clone()) {
+							match sink.try_send(*hash) {
 								Ok(()) => true,
 								Err(e) => {
 									if e.is_full() {
@@ -204,15 +223,15 @@ impl<B: ChainApi> ValidatedPool<B> {
 
 				let mut listener = self.listener.write();
 				fire_events(&mut *listener, &imported);
-				Ok(imported.hash().clone())
+				Ok(*imported.hash())
 			},
 			ValidatedTransaction::Invalid(hash, err) => {
 				self.rotator.ban(&Instant::now(), std::iter::once(hash));
-				Err(err.into())
+				Err(err)
 			},
 			ValidatedTransaction::Unknown(hash, err) => {
 				self.listener.write().invalid(&hash, false);
-				Err(err.into())
+				Err(err)
 			},
 		}
 	}
@@ -237,9 +256,9 @@ impl<B: ChainApi> ValidatedPool<B> {
 			let removed = {
 				let mut pool = self.pool.write();
 				let removed = pool.enforce_limits(ready_limit, future_limit)
-					.into_iter().map(|x| x.hash.clone()).collect::<HashSet<_>>();
+					.into_iter().map(|x| x.hash).collect::<HashSet<_>>();
 				// ban all removed transactions
-				self.rotator.ban(&Instant::now(), removed.iter().map(|x| x.clone()));
+				self.rotator.ban(&Instant::now(), removed.iter().copied());
 				removed
 			};
 			if !removed.is_empty() {
@@ -274,9 +293,9 @@ impl<B: ChainApi> ValidatedPool<B> {
 			},
 			ValidatedTransaction::Invalid(hash, err) => {
 				self.rotator.ban(&Instant::now(), std::iter::once(hash));
-				Err(err.into())
+				Err(err)
 			},
-			ValidatedTransaction::Unknown(_, err) => Err(err.into()),
+			ValidatedTransaction::Unknown(_, err) => Err(err),
 		}
 	}
 
@@ -286,7 +305,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 	/// Transactions that are missing from the pool are not submitted.
 	pub fn resubmit(&self, mut updated_transactions: HashMap<ExtrinsicHash<B>, ValidatedTransactionFor<B>>) {
 		#[derive(Debug, Clone, Copy, PartialEq)]
-		enum Status { Future, Ready, Failed, Dropped };
+		enum Status { Future, Ready, Failed, Dropped }
 
 		let (mut initial_statuses, final_statuses) = {
 			let mut pool = self.pool.write();
@@ -306,9 +325,9 @@ impl<B: ChainApi> ValidatedPool<B> {
 				// note we are not considering tx with hash invalid here - we just want
 				// to remove it along with dependent transactions and `remove_subtree()`
 				// does exactly what we need
-				let removed = pool.remove_subtree(&[hash.clone()]);
+				let removed = pool.remove_subtree(&[hash]);
 				for removed_tx in removed {
-					let removed_hash = removed_tx.hash.clone();
+					let removed_hash = removed_tx.hash;
 					let updated_transaction = updated_transactions.remove(&removed_hash);
 					let tx_to_resubmit = if let Some(updated_tx) = updated_transaction {
 						updated_tx
@@ -322,7 +341,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 						ValidatedTransaction::Valid(transaction)
 					};
 
-					initial_statuses.insert(removed_hash.clone(), Status::Ready);
+					initial_statuses.insert(removed_hash, Status::Ready);
 					txs_to_resubmit.push((removed_hash, tx_to_resubmit));
 				}
 				// make sure to remove the hash even if it's not present in the pool any more.
@@ -349,7 +368,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 										final_statuses.insert(hash, Status::Failed);
 									}
 									for tx in removed {
-										final_statuses.insert(tx.hash.clone(), Status::Dropped);
+										final_statuses.insert(tx.hash, Status::Dropped);
 									}
 								},
 								base::Imported::Future { .. } => {
@@ -379,7 +398,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 				// queue, updating final statuses as required
 				if reject_future_transactions {
 					for future_tx in pool.clear_future() {
-						final_statuses.insert(future_tx.hash.clone(), Status::Dropped);
+						final_statuses.insert(future_tx.hash, Status::Dropped);
 					}
 				}
 
@@ -407,7 +426,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 		self.pool.read().by_hashes(&hashes)
 			.into_iter()
 			.map(|existing_in_pool| existing_in_pool
-				.map(|transaction| transaction.provides.iter().cloned().collect()))
+				.map(|transaction| transaction.provides.to_vec()))
 			.collect()
 	}
 
@@ -456,7 +475,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 			.into_iter()
 			.enumerate()
 			.filter_map(|(idx, r)| match r.map_err(error::IntoPoolError::into_pool_error) {
-				Err(Ok(error::Error::InvalidTransaction(_))) => Some(pruned_hashes[idx].clone()),
+				Err(Ok(error::Error::InvalidTransaction(_))) => Some(pruned_hashes[idx]),
 				_ => None,
 			});
 		// Fire `pruned` notifications for collected hashes and make sure to include
@@ -477,7 +496,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 		hashes: impl Iterator<Item=ExtrinsicHash<B>>,
 	) -> Result<(), B::Error> {
 		let header_hash = self.api.block_id_to_hash(at)?
-			.ok_or_else(|| error::Error::InvalidBlockId(format!("{:?}", at)).into())?;
+			.ok_or_else(|| error::Error::InvalidBlockId(format!("{:?}", at)))?;
 		let mut listener = self.listener.write();
 		let mut set = HashSet::with_capacity(hashes.size_hint().0);
 		for h in hashes {
@@ -498,13 +517,13 @@ impl<B: ChainApi> ValidatedPool<B> {
 	/// See `prune_tags` if you want this.
 	pub fn clear_stale(&self, at: &BlockId<B::Block>) -> Result<(), B::Error> {
 		let block_number = self.api.block_id_to_number(at)?
-			.ok_or_else(|| error::Error::InvalidBlockId(format!("{:?}", at)).into())?
+			.ok_or_else(|| error::Error::InvalidBlockId(format!("{:?}", at)))?
 			.saturated_into::<u64>();
 		let now = Instant::now();
 		let to_remove = {
 			self.ready()
 				.filter(|tx| self.rotator.ban_if_stale(&now, block_number, &tx))
-				.map(|tx| tx.hash.clone())
+				.map(|tx| tx.hash)
 				.collect::<Vec<_>>()
 		};
 		let futures_to_remove: Vec<ExtrinsicHash<B>> = {
@@ -512,7 +531,7 @@ impl<B: ChainApi> ValidatedPool<B> {
 			let mut hashes = Vec::new();
 			for tx in p.futures() {
 				if self.rotator.ban_if_stale(&now, block_number, &tx) {
-					hashes.push(tx.hash.clone());
+					hashes.push(tx.hash);
 				}
 			}
 			hashes

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,11 +20,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use core::convert::TryInto;
 
 use serde::Serialize;
+use inflector::Inflector;
 
 use crate::BenchmarkCmd;
-use frame_benchmarking::{BenchmarkBatch, BenchmarkSelector, Analysis, RegressionModel};
+use frame_benchmarking::{BenchmarkBatch, BenchmarkSelector, Analysis, AnalysisChoice, RegressionModel};
 use sp_runtime::traits::Zero;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -37,6 +39,7 @@ struct TemplateData {
 	date: String,
 	version: String,
 	pallet: String,
+	instance: String,
 	header: String,
 	cmd: CmdData,
 	benchmarks: Vec<BenchmarkData>,
@@ -69,6 +72,7 @@ struct CmdData {
 	wasm_execution: String,
 	chain: String,
 	db_cache: u32,
+	analysis_choice: String,
 }
 
 // This encodes the component name and whether that component is used.
@@ -102,7 +106,10 @@ fn io_error(s: &str) -> std::io::Error {
 // p1 -> [b1, b2, b3]
 // p2 -> [b1, b2]
 // ```
-fn map_results(batches: &[BenchmarkBatch]) -> Result<HashMap<String, Vec<BenchmarkData>>, std::io::Error> {
+fn map_results(
+	batches: &[BenchmarkBatch],
+	analysis_choice: &AnalysisChoice,
+) -> Result<HashMap<(String, String), Vec<BenchmarkData>>, std::io::Error> {
 	// Skip if batches is empty.
 	if batches.is_empty() { return Err(io_error("empty batches")) }
 
@@ -115,20 +122,22 @@ fn map_results(batches: &[BenchmarkBatch]) -> Result<HashMap<String, Vec<Benchma
 		if batch.results.is_empty() { continue }
 
 		let pallet_string = String::from_utf8(batch.pallet.clone()).unwrap();
-		let benchmark_data = get_benchmark_data(batch);
+		let instance_string = String::from_utf8(batch.instance.clone()).unwrap();
+		let benchmark_data = get_benchmark_data(batch, analysis_choice);
 		pallet_benchmarks.push(benchmark_data);
 
 		// Check if this is the end of the iterator
 		if let Some(next) = batches_iter.peek() {
 			// Next pallet is different than current pallet, save and create new data.
 			let next_pallet = String::from_utf8(next.pallet.clone()).unwrap();
-			if next_pallet != pallet_string {
-				all_benchmarks.insert(pallet_string, pallet_benchmarks.clone());
+			let next_instance = String::from_utf8(next.instance.clone()).unwrap();
+			if next_pallet != pallet_string || next_instance != instance_string {
+				all_benchmarks.insert((pallet_string, instance_string), pallet_benchmarks.clone());
 				pallet_benchmarks = Vec::new();
 			}
 		} else {
 			// This is the end of the iterator, so push the final data.
-			all_benchmarks.insert(pallet_string, pallet_benchmarks.clone());
+			all_benchmarks.insert((pallet_string, instance_string), pallet_benchmarks.clone());
 		}
 	}
 	Ok(all_benchmarks)
@@ -146,11 +155,23 @@ fn extract_errors(model: &Option<RegressionModel>) -> impl Iterator<Item=u128> +
 }
 
 // Analyze and return the relevant results for a given benchmark.
-fn get_benchmark_data(batch: &BenchmarkBatch) -> BenchmarkData {
+fn get_benchmark_data(
+	batch: &BenchmarkBatch,
+	analysis_choice: &AnalysisChoice,
+) -> BenchmarkData {
 	// Analyze benchmarks to get the linear regression.
-	let extrinsic_time = Analysis::min_squares_iqr(&batch.results, BenchmarkSelector::ExtrinsicTime).unwrap();
-	let reads = Analysis::min_squares_iqr(&batch.results, BenchmarkSelector::Reads).unwrap();
-	let writes = Analysis::min_squares_iqr(&batch.results, BenchmarkSelector::Writes).unwrap();
+	let analysis_function = match analysis_choice {
+		AnalysisChoice::MinSquares => Analysis::min_squares_iqr,
+		AnalysisChoice::MedianSlopes => Analysis::median_slopes,
+		AnalysisChoice::Max => Analysis::max,
+	};
+
+	let extrinsic_time = analysis_function(&batch.results, BenchmarkSelector::ExtrinsicTime)
+		.expect("analysis function should return an extrinsic time for valid inputs");
+	let reads = analysis_function(&batch.results, BenchmarkSelector::Reads)
+		.expect("analysis function should return the number of reads for valid inputs");
+	let writes = analysis_function(&batch.results, BenchmarkSelector::Writes)
+		.expect("analysis function should return the number of writes for valid inputs");
 
 	// Analysis data may include components that are not used, this filters out anything whose value is zero.
 	let mut used_components = Vec::new();
@@ -251,6 +272,11 @@ pub fn write_results(
 	// Full CLI args passed to trigger the benchmark.
 	let args = std::env::args().collect::<Vec<String>>();
 
+	// Which analysis function should be used when outputting benchmarks
+	let analysis_choice: AnalysisChoice = cmd.output_analysis.clone()
+		.try_into()
+		.map_err(|e| io_error(e))?;
+
 	// Capture individual args
 	let cmd_data = CmdData {
 		steps: cmd.steps.clone(),
@@ -261,6 +287,7 @@ pub fn write_results(
 		wasm_execution: cmd.wasm_method.to_string(),
 		chain: format!("{:?}", cmd.shared_params.chain),
 		db_cache: cmd.database_cache_size,
+		analysis_choice: format!("{:?}", analysis_choice),
 	};
 
 	// New Handlebars instance with helpers.
@@ -271,13 +298,19 @@ pub fn write_results(
 	handlebars.register_escape_fn(|s| -> String { s.to_string() });
 
 	// Organize results by pallet into a JSON map
-	let all_results = map_results(batches)?;
-	for (pallet, results) in all_results.into_iter() {
+	let all_results = map_results(batches, &analysis_choice)?;
+	for ((pallet, instance), results) in all_results.iter() {
 		let mut file_path = path.clone();
 		// If a user only specified a directory...
 		if file_path.is_dir() {
-			// Create new file: "path/to/pallet_name.rs".
-			file_path.push(&pallet);
+			// Check if there might be multiple instances benchmarked.
+			if all_results.keys().any(|(p, i)| p == pallet && i != instance) {
+				// Create new file: "path/to/pallet_name_instance_name.rs".
+				file_path.push(pallet.clone() + "_" + &instance.to_snake_case());
+			} else {
+				// Create new file: "path/to/pallet_name.rs".
+				file_path.push(pallet.clone());
+			}
 			file_path.set_extension("rs");
 		}
 
@@ -285,10 +318,11 @@ pub fn write_results(
 			args: args.clone(),
 			date: date.clone(),
 			version: VERSION.to_string(),
-			pallet: pallet,
+			pallet: pallet.to_string(),
+			instance: instance.to_string(),
 			header: header_text.clone(),
 			cmd: cmd_data.clone(),
-			benchmarks: results,
+			benchmarks: results.clone(),
 		};
 
 		let mut output_file = fs::File::create(file_path)?;
@@ -387,12 +421,14 @@ mod test {
 					repeat_reads: 0,
 					writes: (base + slope * i).into(),
 					repeat_writes: 0,
+					proof_size: 0,
 				}
 			)
 		}
 
 		return BenchmarkBatch {
 			pallet: [pallet.to_vec(), b"_pallet".to_vec()].concat(),
+			instance: b"instance".to_vec(),
 			benchmark: [benchmark.to_vec(), b"_benchmark".to_vec()].concat(),
 			results,
 		}
@@ -443,17 +479,23 @@ mod test {
 			test_data(b"first", b"first", BenchmarkParameter::a, 10, 3),
 			test_data(b"first", b"second", BenchmarkParameter::b, 9, 2),
 			test_data(b"second", b"first", BenchmarkParameter::c, 3, 4),
-		]).unwrap();
+		], &AnalysisChoice::default()).unwrap();
 
-		let first_benchmark = &mapped_results.get("first_pallet").unwrap()[0];
+		let first_benchmark = &mapped_results.get(
+			&("first_pallet".to_string(), "instance".to_string())
+		).unwrap()[0];
 		assert_eq!(first_benchmark.name, "first_benchmark");
 		check_data(first_benchmark, "a", 10, 3);
 
-		let second_benchmark = &mapped_results.get("first_pallet").unwrap()[1];
+		let second_benchmark = &mapped_results.get(
+			&("first_pallet".to_string(), "instance".to_string())
+		).unwrap()[1];
 		assert_eq!(second_benchmark.name, "second_benchmark");
 		check_data(second_benchmark, "b", 9, 2);
 
-		let second_pallet_benchmark = &mapped_results.get("second_pallet").unwrap()[0];
+		let second_pallet_benchmark = &mapped_results.get(
+			&("second_pallet".to_string(), "instance".to_string())
+		).unwrap()[0];
 		assert_eq!(second_pallet_benchmark.name, "first_benchmark");
 		check_data(second_pallet_benchmark, "c", 3, 4);
 	}

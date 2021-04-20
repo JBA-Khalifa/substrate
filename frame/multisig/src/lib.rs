@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,8 +18,8 @@
 //! # Multisig Module
 //! A module for doing multisig dispatch.
 //!
-//! - [`multisig::Config`](./trait.Config.html)
-//! - [`Call`](./enum.Call.html)
+//! - [`Config`]
+//! - [`Call`]
 //!
 //! ## Overview
 //!
@@ -160,7 +160,7 @@ decl_error! {
 		/// A timepoint was given, yet no multisig operation is underway.
 		UnexpectedTimepoint,
 		/// The maximum weight information provided was too low.
-		WeightTooLow,
+		MaxWeightTooLow,
 		/// The data to be stored is already stored.
 		AlreadyStored,
 	}
@@ -223,13 +223,16 @@ decl_module! {
 		/// - DB Weight: None
 		/// - Plus Call Weight
 		/// # </weight>
-		#[weight = (
-			T::WeightInfo::as_multi_threshold_1(call.using_encoded(|c| c.len() as u32))
-				.saturating_add(call.get_dispatch_info().weight)
-				 // AccountData for inner call origin accountdata.
-				.saturating_add(T::DbWeight::get().reads_writes(1, 1)),
-			call.get_dispatch_info().class,
-		)]
+		#[weight = {
+			let dispatch_info = call.get_dispatch_info();
+			(
+				T::WeightInfo::as_multi_threshold_1(call.using_encoded(|c| c.len() as u32))
+					.saturating_add(dispatch_info.weight)
+					// AccountData for inner call origin accountdata.
+					.saturating_add(T::DbWeight::get().reads_writes(1, 1)),
+				dispatch_info.class,
+			)
+		}]
 		fn as_multi_threshold_1(origin,
 			other_signatories: Vec<T::AccountId>,
 			call: Box<<T as Config>::Call>,
@@ -433,7 +436,8 @@ decl_module! {
 			ensure!(m.when == timepoint, Error::<T>::WrongTimepoint);
 			ensure!(m.depositor == who, Error::<T>::NotOwner);
 
-			let _ = T::Currency::unreserve(&m.depositor, m.deposit);
+			let err_amount = T::Currency::unreserve(&m.depositor, m.deposit);
+			debug_assert!(err_amount.is_zero());
 			<Multisigs<T>>::remove(&id, &call_hash);
 			Self::clear_call(&call_hash);
 
@@ -500,7 +504,7 @@ impl<T: Config> Module<T> {
 
 			if let Some((call, call_len)) = maybe_approved_call {
 				// verify weight
-				ensure!(call.get_dispatch_info().weight <= max_weight, Error::<T>::WeightTooLow);
+				ensure!(call.get_dispatch_info().weight <= max_weight, Error::<T>::MaxWeightTooLow);
 
 				// Clean up storage before executing call to avoid an possibility of reentrancy
 				// attack.
@@ -635,8 +639,8 @@ impl<T: Config> Module<T> {
 	/// The current `Timepoint`.
 	pub fn timepoint() -> Timepoint<T::BlockNumber> {
 		Timepoint {
-			height: <system::Module<T>>::block_number(),
-			index: <system::Module<T>>::extrinsic_index().unwrap_or_default(),
+			height: <system::Pallet<T>>::block_number(),
+			index: <system::Pallet<T>>::extrinsic_index().unwrap_or_default(),
 		}
 	}
 

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,15 +19,16 @@
 
 use super::*;
 
-use frame_benchmarking::{benchmarks, account, whitelist_account};
+use frame_benchmarking::{benchmarks, account, whitelist_account, impl_benchmark_test_suite};
 use frame_support::{
-	IterableStorageMap,
-	traits::{Currency, Get, EnsureOrigin, OnInitialize, UnfilteredDispatchable, schedule::DispatchTime},
+	assert_noop, assert_ok, IterableStorageMap,
+	traits::{Currency, Get, EnsureOrigin, OnInitialize, UnfilteredDispatchable,
+        schedule::DispatchTime},
 };
-use frame_system::{RawOrigin, Module as System, self, EventRecord};
+use frame_system::{RawOrigin, Pallet as System, self, EventRecord};
 use sp_runtime::traits::{Bounded, One};
 
-use crate::Module as Democracy;
+use crate::Pallet as Democracy;
 
 const SEED: u32 = 0;
 const MAX_REFERENDUMS: u32 = 99;
@@ -97,8 +98,6 @@ fn account_vote<T: Config>(b: BalanceOf<T>) -> AccountVote<BalanceOf<T>> {
 }
 
 benchmarks! {
-	_ { }
-
 	propose {
 		let p = T::MaxProposals::get();
 
@@ -208,11 +207,14 @@ benchmarks! {
 		let origin = T::CancellationOrigin::successful_origin();
 		let referendum_index = add_referendum::<T>(0)?;
 		let call = Call::<T>::emergency_cancel(referendum_index);
-		assert!(Democracy::<T>::referendum_status(referendum_index).is_ok());
+		assert_ok!(Democracy::<T>::referendum_status(referendum_index));
 	}: { call.dispatch_bypass_filter(origin)? }
 	verify {
 		// Referendum has been canceled
-		assert!(Democracy::<T>::referendum_status(referendum_index).is_err());
+		assert_noop!(
+			Democracy::<T>::referendum_status(referendum_index),
+			Error::<T>::ReferendumInvalid,
+		);
 	}
 
 	blacklist {
@@ -226,18 +228,23 @@ benchmarks! {
 
 		// Place our proposal in the external queue, too.
 		let hash = T::Hashing::hash_of(&0);
-		assert!(Democracy::<T>::external_propose(T::ExternalOrigin::successful_origin(), hash.clone()).is_ok());
+		assert_ok!(
+            Democracy::<T>::external_propose(T::ExternalOrigin::successful_origin(), hash.clone())
+        );
 
 		// Add a referendum of our proposal.
 		let referendum_index = add_referendum::<T>(0)?;
-		assert!(Democracy::<T>::referendum_status(referendum_index).is_ok());
+		assert_ok!(Democracy::<T>::referendum_status(referendum_index));
 
 		let call = Call::<T>::blacklist(hash, Some(referendum_index));
 		let origin = T::BlacklistOrigin::successful_origin();
 	}: { call.dispatch_bypass_filter(origin)? }
 	verify {
 		// Referendum has been canceled
-		assert!(Democracy::<T>::referendum_status(referendum_index).is_err());
+		assert_noop!(
+            Democracy::<T>::referendum_status(referendum_index),
+            Error::<T>::ReferendumInvalid
+        );
 	}
 
 	// Worst case scenario, we external propose a previously blacklisted proposal
@@ -783,44 +790,9 @@ benchmarks! {
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::tests::{new_test_ext, Test};
-	use frame_support::assert_ok;
 
-	#[test]
-	fn test_benchmarks() {
-		new_test_ext().execute_with(|| {
-			assert_ok!(test_benchmark_propose::<Test>());
-			assert_ok!(test_benchmark_second::<Test>());
-			assert_ok!(test_benchmark_vote_new::<Test>());
-			assert_ok!(test_benchmark_vote_existing::<Test>());
-			assert_ok!(test_benchmark_emergency_cancel::<Test>());
-			assert_ok!(test_benchmark_external_propose::<Test>());
-			assert_ok!(test_benchmark_external_propose_majority::<Test>());
-			assert_ok!(test_benchmark_external_propose_default::<Test>());
-			assert_ok!(test_benchmark_fast_track::<Test>());
-			assert_ok!(test_benchmark_veto_external::<Test>());
-			assert_ok!(test_benchmark_cancel_referendum::<Test>());
-			assert_ok!(test_benchmark_cancel_queued::<Test>());
-			assert_ok!(test_benchmark_on_initialize_external::<Test>());
-			assert_ok!(test_benchmark_on_initialize_public::<Test>());
-			assert_ok!(test_benchmark_on_initialize_base::<Test>());
-			assert_ok!(test_benchmark_delegate::<Test>());
-			assert_ok!(test_benchmark_undelegate::<Test>());
-			assert_ok!(test_benchmark_clear_public_proposals::<Test>());
-			assert_ok!(test_benchmark_note_preimage::<Test>());
-			assert_ok!(test_benchmark_note_imminent_preimage::<Test>());
-			assert_ok!(test_benchmark_reap_preimage::<Test>());
-			assert_ok!(test_benchmark_unlock_remove::<Test>());
-			assert_ok!(test_benchmark_unlock_set::<Test>());
-			assert_ok!(test_benchmark_remove_vote::<Test>());
-			assert_ok!(test_benchmark_remove_other_vote::<Test>());
-			assert_ok!(test_benchmark_enact_proposal_execute::<Test>());
-			assert_ok!(test_benchmark_enact_proposal_slash::<Test>());
-			assert_ok!(test_benchmark_blacklist::<Test>());
-			assert_ok!(test_benchmark_cancel_proposal::<Test>());
-		});
-	}
-}
+impl_benchmark_test_suite!(
+	Democracy,
+	crate::tests::new_test_ext(),
+	crate::tests::Test,
+);

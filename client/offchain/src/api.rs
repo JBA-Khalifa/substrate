@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use std::{
 	str::FromStr,
@@ -24,12 +26,11 @@ use std::{
 
 use crate::NetworkProvider;
 use futures::Future;
-use log::error;
 use sc_network::{PeerId, Multiaddr};
 use codec::{Encode, Decode};
 use sp_core::OpaquePeerId;
 use sp_core::offchain::{
-	Externalities as OffchainExt, HttpRequestId, Timestamp, HttpRequestStatus, HttpError,
+	self, HttpRequestId, Timestamp, HttpRequestStatus, HttpError,
 	OffchainStorage, OpaqueNetworkState, OpaqueMultiaddr, StorageKind,
 };
 pub use sp_offchain::STORAGE_PREFIX;
@@ -45,22 +46,9 @@ mod http_dummy;
 
 mod timestamp;
 
-/// Asynchronous offchain API.
-///
-/// NOTE this is done to prevent recursive calls into the runtime (which are not supported currently).
-pub(crate) struct Api<Storage> {
-	/// Offchain Workers database.
-	db: Storage,
-	/// A provider for substrate networking.
-	network_provider: Arc<dyn NetworkProvider + Send + Sync>,
-	/// Is this node a potential validator?
-	is_validator: bool,
-	/// Everything HTTP-related is handled by a different struct.
-	http: http::HttpApi,
-}
-
 fn unavailable_yet<R: Default>(name: &str) -> R {
-	error!(
+	log::error!(
+		target: "sc_offchain",
 		"The {:?} API is not available for offchain workers yet. Follow \
 		https://github.com/paritytech/substrate/issues/1458 for details", name
 	);
@@ -69,7 +57,109 @@ fn unavailable_yet<R: Default>(name: &str) -> R {
 
 const LOCAL_DB: &str = "LOCAL (fork-aware) DB";
 
-impl<Storage: OffchainStorage> OffchainExt for Api<Storage> {
+/// Offchain DB reference.
+#[derive(Debug, Clone)]
+pub struct Db<Storage> {
+	/// Persistent storage database.
+	persistent: Storage,
+}
+
+impl<Storage: OffchainStorage> Db<Storage> {
+	/// Create new instance of Offchain DB.
+	pub fn new(persistent: Storage) -> Self {
+		Self { persistent }
+	}
+
+	/// Create new instance of Offchain DB, backed by given backend.
+	pub fn factory_from_backend<Backend, Block>(backend: &Backend) -> Option<
+		Box<dyn sc_client_api::execution_extensions::DbExternalitiesFactory>
+	> where
+		Backend: sc_client_api::Backend<Block, OffchainStorage = Storage>,
+		Block: sp_runtime::traits::Block,
+		Storage: 'static,
+	{
+		sc_client_api::Backend::offchain_storage(backend).map(|db|
+			Box::new(Self::new(db)) as _
+		)
+	}
+}
+
+impl<Storage: OffchainStorage> offchain::DbExternalities for Db<Storage> {
+	fn local_storage_set(&mut self, kind: StorageKind, key: &[u8], value: &[u8]) {
+		log::debug!(
+			target: "sc_offchain",
+			"{:?}: Write: {:?} <= {:?}", kind, hex::encode(key), hex::encode(value)
+		);
+		match kind {
+			StorageKind::PERSISTENT => self.persistent.set(STORAGE_PREFIX, key, value),
+			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
+		}
+	}
+
+	fn local_storage_clear(&mut self, kind: StorageKind, key: &[u8]) {
+		log::debug!(
+			target: "sc_offchain",
+			"{:?}: Clear: {:?}", kind, hex::encode(key)
+		);
+		match kind {
+			StorageKind::PERSISTENT => self.persistent.remove(STORAGE_PREFIX, key),
+			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
+		}
+	}
+
+	fn local_storage_compare_and_set(
+		&mut self,
+		kind: StorageKind,
+		key: &[u8],
+		old_value: Option<&[u8]>,
+		new_value: &[u8],
+	) -> bool {
+		log::debug!(
+			target: "sc_offchain",
+			"{:?}: CAS: {:?} <= {:?} vs {:?}",
+			kind,
+			hex::encode(key),
+			hex::encode(new_value),
+			old_value.as_ref().map(hex::encode),
+		);
+		match kind {
+			StorageKind::PERSISTENT => {
+				self.persistent.compare_and_set(STORAGE_PREFIX, key, old_value, new_value)
+			},
+			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
+		}
+	}
+
+	fn local_storage_get(&mut self, kind: StorageKind, key: &[u8]) -> Option<Vec<u8>> {
+		let result = match kind {
+			StorageKind::PERSISTENT => self.persistent.get(STORAGE_PREFIX, key),
+			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
+		};
+		log::debug!(
+			target: "sc_offchain",
+			"{:?}: Read: {:?} => {:?}",
+			kind,
+			hex::encode(key),
+			result.as_ref().map(hex::encode)
+		);
+		result
+	}
+}
+
+/// Asynchronous offchain API.
+///
+/// NOTE this is done to prevent recursive calls into the runtime
+/// (which are not supported currently).
+pub(crate) struct Api {
+	/// A provider for substrate networking.
+	network_provider: Arc<dyn NetworkProvider + Send + Sync>,
+	/// Is this node a potential validator?
+	is_validator: bool,
+	/// Everything HTTP-related is handled by a different struct.
+	http: http::HttpApi,
+}
+
+impl offchain::Externalities for Api {
 	fn is_validator(&self) -> bool {
 		self.is_validator
 	}
@@ -94,42 +184,6 @@ impl<Storage: OffchainStorage> OffchainExt for Api<Storage> {
 
 	fn random_seed(&mut self) -> [u8; 32] {
 		rand::random()
-	}
-
-	fn local_storage_set(&mut self, kind: StorageKind, key: &[u8], value: &[u8]) {
-		match kind {
-			StorageKind::PERSISTENT => self.db.set(STORAGE_PREFIX, key, value),
-			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
-		}
-	}
-
-	fn local_storage_clear(&mut self, kind: StorageKind, key: &[u8]) {
-		match kind {
-			StorageKind::PERSISTENT => self.db.remove(STORAGE_PREFIX, key),
-			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
-		}
-	}
-
-	fn local_storage_compare_and_set(
-		&mut self,
-		kind: StorageKind,
-		key: &[u8],
-		old_value: Option<&[u8]>,
-		new_value: &[u8],
-	) -> bool {
-		match kind {
-			StorageKind::PERSISTENT => {
-				self.db.compare_and_set(STORAGE_PREFIX, key, old_value, new_value)
-			},
-			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
-		}
-	}
-
-	fn local_storage_get(&mut self, kind: StorageKind, key: &[u8]) -> Option<Vec<u8>> {
-		match kind {
-			StorageKind::PERSISTENT => self.db.get(STORAGE_PREFIX, key),
-			StorageKind::LOCAL => unavailable_yet(LOCAL_DB),
-		}
 	}
 
 	fn http_request_start(
@@ -185,9 +239,9 @@ impl<Storage: OffchainStorage> OffchainExt for Api<Storage> {
 
 	fn set_authorized_nodes(&mut self, nodes: Vec<OpaquePeerId>, authorized_only: bool) {
 		let peer_ids: HashSet<PeerId> = nodes.into_iter()
-			.filter_map(|node| PeerId::from_bytes(node.0).ok())
+			.filter_map(|node| PeerId::from_bytes(&node.0).ok())
 			.collect();
-		
+
 		self.network_provider.set_authorized_peers(peer_ids);
 		self.network_provider.set_authorized_only(authorized_only);
 	}
@@ -211,7 +265,7 @@ impl NetworkState {
 
 impl From<NetworkState> for OpaqueNetworkState {
 	fn from(state: NetworkState) -> OpaqueNetworkState {
-		let enc = Encode::encode(&state.peer_id.into_bytes());
+		let enc = Encode::encode(&state.peer_id.to_bytes());
 		let peer_id = OpaquePeerId::new(enc);
 
 		let external_addresses: Vec<OpaqueMultiaddr> = state
@@ -237,7 +291,7 @@ impl TryFrom<OpaqueNetworkState> for NetworkState {
 		let inner_vec = state.peer_id.0;
 
 		let bytes: Vec<u8> = Decode::decode(&mut &inner_vec[..]).map_err(|_| ())?;
-		let peer_id = PeerId::from_bytes(bytes).map_err(|_| ())?;
+		let peer_id = PeerId::from_bytes(&bytes).map_err(|_| ())?;
 
 		let external_addresses: Result<Vec<Multiaddr>, Self::Error> = state.external_addresses
 			.iter()
@@ -268,16 +322,14 @@ pub(crate) struct AsyncApi {
 
 impl AsyncApi {
 	/// Creates new Offchain extensions API implementation an the asynchronous processing part.
-	pub fn new<S: OffchainStorage>(
-		db: S,
+	pub fn new(
 		network_provider: Arc<dyn NetworkProvider + Send + Sync>,
 		is_validator: bool,
 		shared_client: SharedClient,
-	) -> (Api<S>, Self) {
+	) -> (Api, Self) {
 		let (http_api, http_worker) = http::http(shared_client);
 
 		let api = Api {
-			db,
 			network_provider,
 			is_validator,
 			http: http_api,
@@ -301,9 +353,10 @@ impl AsyncApi {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::{convert::{TryFrom, TryInto}, time::SystemTime};
 	use sc_client_db::offchain::LocalStorage;
 	use sc_network::{NetworkStateInfo, PeerId};
+	use sp_core::offchain::{Externalities, DbExternalities};
+	use std::{convert::{TryFrom, TryInto}, time::SystemTime};
 
 	struct TestNetwork();
 
@@ -327,18 +380,20 @@ mod tests {
 		}
 	}
 
-	fn offchain_api() -> (Api<LocalStorage>, AsyncApi) {
+	fn offchain_api() -> (Api, AsyncApi) {
 		sp_tracing::try_init_simple();
-		let db = LocalStorage::new_test();
 		let mock = Arc::new(TestNetwork());
 		let shared_client = SharedClient::new();
 
 		AsyncApi::new(
-			db,
 			mock,
 			false,
 			shared_client,
 		)
+	}
+
+	fn offchain_db() -> Db<LocalStorage> {
+		Db::new(LocalStorage::new_test())
 	}
 
 	#[test]
@@ -379,7 +434,7 @@ mod tests {
 	fn should_set_and_get_local_storage() {
 		// given
 		let kind = StorageKind::PERSISTENT;
-		let mut api = offchain_api().0;
+		let mut api = offchain_db();
 		let key = b"test";
 
 		// when
@@ -394,7 +449,7 @@ mod tests {
 	fn should_compare_and_set_local_storage() {
 		// given
 		let kind = StorageKind::PERSISTENT;
-		let mut api = offchain_api().0;
+		let mut api = offchain_db();
 		let key = b"test";
 		api.local_storage_set(kind, key, b"value");
 
@@ -411,7 +466,7 @@ mod tests {
 	fn should_compare_and_set_local_storage_with_none() {
 		// given
 		let kind = StorageKind::PERSISTENT;
-		let mut api = offchain_api().0;
+		let mut api = offchain_db();
 		let key = b"test";
 
 		// when

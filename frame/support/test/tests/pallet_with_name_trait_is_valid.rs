@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,7 +46,7 @@ frame_support::decl_module! {
 		const Foo: u32 = u32::max_value();
 
 		#[weight = 0]
-		fn accumulate_dummy(origin, increase_by: T::Balance) {
+		fn accumulate_dummy(_origin, _increase_by: T::Balance) {
 			unimplemented!();
 		}
 
@@ -81,6 +81,10 @@ impl<T: Trait> sp_inherents::ProvideInherent for Module<T> {
 	fn check_inherent(_: &Self::Call, _: &sp_inherents::InherentData) -> std::result::Result<(), Self::Error> {
 		unimplemented!();
 	}
+
+	fn is_inherent(_call: &Self::Call) -> bool {
+		unimplemented!();
+	}
 }
 
 #[cfg(test)]
@@ -88,7 +92,6 @@ mod tests {
 	use crate as pallet_test;
 
 	use frame_support::parameter_types;
-	use sp_runtime::traits::Block;
 
 	type SignedExtra = (
 		frame_system::CheckEra<Runtime>,
@@ -110,8 +113,8 @@ mod tests {
 			NodeBlock = TestBlock,
 			UncheckedExtrinsic = TestUncheckedExtrinsic
 		{
-			System: frame_system::{Module, Call, Config, Storage, Event<T>},
-			PalletTest: pallet_test::{Module, Call, Storage, Event<T>, Config, ValidateUnsigned, Inherent},
+			System: frame_system::{Pallet, Call, Config, Storage, Event<T>},
+			PalletTest: pallet_test::{Pallet, Call, Storage, Event<T>, Config, ValidateUnsigned, Inherent},
 		}
 	);
 
@@ -136,11 +139,13 @@ mod tests {
 		type BlockWeights = ();
 		type BlockLength = ();
 		type Version = ();
-		type PalletInfo = ();
+		type PalletInfo = PalletInfo;
 		type AccountData = ();
 		type OnNewAccount = ();
 		type OnKilledAccount = ();
 		type SystemWeightInfo = ();
+		type SS58Prefix = ();
+		type OnSetCode = ();
 	}
 
 	impl pallet_test::Trait for Runtime {
